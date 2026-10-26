@@ -97,10 +97,23 @@ AI kingdoms and Black earn income too, so their loot grows while you wait.
 - **Undefended** castles and towers are taken just by touching them.
 - **Goal**: hold all four castles. A banner tells you when the land is united.
 
-**AI kingdoms** each have 2 roaming armies. They walk to the nearest tower they do not own and take it
-**by touching it, without a fight**. Taking a tower costs the army a random **10–30 %** of its units,
-which stay behind as that tower's guard. They also take towers you own. AI armies never attack castles
-or the hero, and walk in straight lines ignoring water (simplification).
+**AI kingdoms** each have 2 roaming armies. They walk to the nearest tower they do not own, **stand at
+it for 10 seconds** (the label counts down), and take it **without a fight**. Taking a tower costs the
+army a random **10–30 %** of its units, which stay behind as that tower's guard. The capture animation
+plays, then the army walks on to the next tower. They also take towers you own. AI armies never attack
+castles or the hero.
+
+AI armies and bandits **walk by the same rules as the hero**: A* (the `pathfinding` crate) over
+`TerrainMap::can_step`, so they go around water and reach a plateau only by its staircase. An army
+picks the nearest tower **by walking distance**; a tower nobody can reach (island, plateau without
+stairs) is skipped and stays as it is. After a capture an army with **fewer than 5 units** walks
+back to its castle ("returning home"), rests 60 s ("resting... Ns") and sets out again with a fresh
+army; the garrison is untouched.
+
+**Tower sprites** use `buildings/<colour>_buildings/tower.png` in the holder's colour: Black at the
+start, then whoever takes it. A change of owner plays explosion + dust, then dust alone, then the
+tower switches colour (`tower_capture_visuals` in `overworld/mod.rs`, about 1 s). This also plays when
+you come back from winning a tower fight.
 
 ### 1.6 World generation, layers and tiles
 
@@ -167,7 +180,7 @@ A **stack** is a group of units of the **same kind** standing on one tile. Every
 | `defence` | Damage each unit absorbs before losing health |
 | `speed` | Movement range in tiles |
 | `damage` | A `min..=max` range, rolled by every other unit in the stack (see 3.2) |
-| `range` | Strike range in tiles. 1 = melee. Archers have 6 (placeholder number) |
+| `range` | Strike range in tiles as `min..=max`, like damage. `1..=1` = melee (adjacent only). Archers have `2..=4`: they cannot hit anything closer than 2 tiles |
 | actions | The actions the kind can perform (see 3.3) |
 
 Unit kinds available in the pack: **Warrior, Archer, Lancer, Monk, Pawn**.
@@ -178,8 +191,9 @@ Unit kinds available in the pack: **Warrior, Archer, Lancer, Monk, Pawn**.
 
 **Who can strike whom**
 - Melee kinds (range 1) strike an adjacent enemy stack.
-- Ranged kinds (Archer) strike any enemy stack within `range` tiles (as the crow flies), but **not**
-  while an enemy stack is adjacent to them. Being diagonal to an enemy does not block shooting.
+- Ranged kinds (Archer) strike an enemy stack whose straight-line distance (the larger of dx, dy) lies
+  within `range`, so an archer with `2..=4` cannot hit a neighbour, diagonal or not, and cannot reach
+  past 4 tiles. Enemies standing next to an archer do not stop it from shooting others.
 
 **Flanking**: if one of the attacker's stacks stands on the far side of the target (the tile straight
 behind it, seen from the attacker) the target loses **1 defence** for that strike.
@@ -211,7 +225,7 @@ Every stack gets **3 action points (AP)** per turn and can mix actions freely.
 | Action | Cost | Effect |
 |---|---|---|
 | **Move** | 1 AP | Move up to `speed` steps. A straight step costs 1; diagonal steps alternate 1, 2, 1, 2 (Pathfinder rule), so two diagonals cost 3 |
-| **Strike** | 1 AP | Attack an enemy stack using the rules in 3.2 (melee: adjacent; ranged: in range and not engaged) |
+| **Strike** | 1 AP | Attack an enemy stack using the rules in 3.2 (melee: adjacent; ranged: distance within its `min..=max` range) |
 | **Unstack** | 1 AP | Split into two equal halves (odd count: the extra unit stays). The new half goes to the first free tile starting to the right and going clockwise. The original keeps the wounded lead unit and the remaining AP; the new half is inserted in the turn order **right before** the original, so from the next round it acts first |
 | **Merge** | 1 AP | Merge with an adjacent friendly stack of the **same kind**. The counts are added into the active stack, the other stack disappears from the grid and the turn order. Its wounded lead unit is healed (a stack only tracks one wounded unit) |
 | **Shield up** | 1 AP | +3 defence until this stack's next turn starts |
@@ -223,7 +237,7 @@ tile around it cannot unstack.
 
 1. Both armies are placed: player in the left columns, enemy in the right columns.
 2. Turn order is shuffled once per battle and cycles through every living stack.
-3. The active stack spends its AP; when AP reaches 0 (or End Turn is pressed) the next stack acts.
+3. The active stack spends its AP. Every action locks the battle while it plays out, never longer than **2 s**: a move takes 1 s for the first step and 0.5 s per further step; a strike lasts as long as the attack animation (at least 0.5 s), or the arrow's flight at 0.25 s per tile for archers; Unstack, Merge and Shield up 0.5 s; End turn 0.3 s. A destroyed stack stays visible until the lock ends. When AP reaches 0 (or End Turn is pressed) the next stack acts after that lock. Constants are at the top of `combat/actions.rs`.
 4. When one side has no stacks left the battle ends and the game returns to the overworld.
 
 ---
@@ -252,7 +266,7 @@ cleans them up automatically.
 | `src/units/mod.rs` | – | `UnitKind`, `UnitStats`, `Stack`, `Team`, `Army` |
 | `src/units/rules.rs` | – | Pure combat maths (no Bevy): `stack_damage`, `apply_damage`, `merge`, `split`. Unit tests live here |
 | `src/overworld/mod.rs` | `OverworldPlugin` | Spawns the map from `WorldState`, hero movement (water blocks), camera, HUD |
-| `src/overworld/terrain.rs` | – | `Terrain`, `TerrainMap`, value noise, `generate()` |
+| `src/overworld/terrain.rs` | – | `Terrain`, `TerrainMap` (layers, stairs, `can_step`, `find_path` via the `pathfinding` crate), value noise, `generate()` |
 | `src/overworld/buildings.rs` | – | `BuildingKind` (what it sells, size, colour, sprite), base layout |
 | `src/overworld/world.rs` | – | `WorldState` (bases, towers, sellers, armies, bandits, hero pos), generation, `capture()` |
 | `src/overworld/economy.rs` | `EconomyPlugin` | `Treasuries` (gold per faction), income timer |
@@ -273,6 +287,7 @@ cleans them up automatically.
 | `Hero`, `MoveSpeed` | overworld hero | The player avatar |
 | `Touchable { touch, radius }` | buildings, towers, sellers | What touching it means (`Touch::Castle/Shop/Tower/Seller`) |
 | `AiArmyMarker(i)`, `BanditMarker(i)` | roaming armies | Index into `WorldState.armies` / `.bandits`; transforms are synced from there |
+| `TowerVisual { index, shown, swap }` | towers | Which owner colour the tower sprite shows and the pending swap after a capture |
 | `ArmyLabel` | roamer children | Floating text kept in sync with the army |
 | `Faction` | hero, roamers, stacks | Which side owns it; drives fill colour and sprite folder |
 | `Team` | stacks | `Player` or `Enemy`. Drives the green/red "yours vs theirs" border |
@@ -281,7 +296,13 @@ cleans them up automatically.
 | `Tile` | grid tiles | Clickable floor |
 | `ActiveStack`, `ActionPoints` | the stack whose turn it is | Removed and re-added each turn |
 | `ShieldUp(bonus)` | a stack | Shield up buff; removed when that stack's next turn starts |
-| `CountLabel`, `TeamTag`, `ActiveMarker`, … | HUD children | Labels refreshed by hud.rs |
+| `UnitVisual { faction, kind, anim, once, flip_x }` | unit sprite children | What sheet a unit shows; changing it swaps the sheet (`assets.rs`) |
+| `Animated` | any atlas sprite | Frame stepping, looping or one-shot |
+| `MoveTween` | a moving stack | Slides it to its new tile during the action delay |
+| `Projectile` | an arrow | Flies from archer to target during the action delay |
+| `Dying` | a destroyed stack | Kept on the board until the blow lands and the death dust replaces it |
+| `PendingEffect`, `OneShotEffect` | effects | A queued / playing particle effect (`spawn_effect` in `assets.rs`) |
+| `CountLabel`, `ActiveMarker`, … | HUD children | Labels refreshed by hud.rs |
 
 ### 4.4 Resources
 
@@ -298,7 +319,9 @@ cleans them up automatically.
 | `CombatLog` | Combat | Last few lines of what happened |
 | `Hovered` | Combat | The stack under the mouse (for the info panel) |
 | `CombatResult` | end of Combat | `Victory` or `Defeat` |
-| `EnemyThinkTimer` | always | Pause between enemy AI actions |
+| `ActionLock` | Combat | Pause after every action (length depends on the action, max 2 s); nothing acts while it runs, and the turn passes when it ends if AP is spent |
+| `EnemyThinkTimer` | always | Extra pause before each enemy AI action |
+| `UnitSprites` | always | Cache of loaded unit strips per faction, kind and animation |
 
 ### 4.5 Messages
 
@@ -335,9 +358,11 @@ OnEnter(CombatPhase::Finished) show_result ; Update: wait_for_continue -> Overwo
 - **a new kingdom** → `Faction` variant + colour + sprite folder in `faction.rs`, and add it to `Faction::KINGDOMS`.
 - **a new building** → `BuildingKind` in `overworld/buildings.rs` (what it sells, size) and a slot in `base_layout()`.
 - **a new thing to touch** → `Touch` variant in `overworld/interact.rs`, spawn it with a `Touchable`, handle it in the systems there and in the HUD prompt.
-- **a new roamer behaviour** → `overworld/armies.rs` (`ai_armies_act`, `bandits_wander`).
+- **a new roamer behaviour** → `overworld/armies.rs` (`ai_armies_act` state machine, `bandits_wander`, `follow_path`).
+- **movement rules** → `TerrainMap::can_step` in `overworld/terrain.rs`; the hero and `find_path` (used by all roamers) both go through it.
 - **anything clickable in combat** → give the sprite `Pickable::default()`. Bevy 0.19 only hit-tests sprites that carry that component; labels and decorations get `Pickable::IGNORE`.
 - **tuning** → the constants at the top of `economy.rs`, `armies.rs`, `world.rs`, `terrain.rs` (water / mountain thresholds).
+- **a new particle effect** → an `Fx` variant with its file in `assets.rs`, then `spawn_effect(.., fx, pos, z, scale, delay, replaces)` wherever it should play.
 - **a new decoration** → `DecorationKind` + `place_decorations` in `world.rs`, a `Strip` in `assets.rs`, a match arm in `spawn_decorations`.
 - **which sheet draws what** → `ground_sprite` and `blob_cell` in `overworld/mod.rs`, `BASE_GROUND_SHEET` for the base ground.
 - **what defends something / what a win does** → `WorldState::enemy_army_for` and `WorldState::capture` in `overworld/world.rs`.
@@ -349,26 +374,39 @@ OnEnter(CombatPhase::Finished) show_result ; Update: wait_for_continue -> Overwo
 
 The pack was moved to `assets/` with **snake_case** folder and file names (the original zip is kept),
 so paths load with `asset_server.load("terrain/tileset/tilemap_color1.png")`. Frame sizes were
-measured from the PNGs. Terrain and decorations are wired in (`src/assets.rs`); units, buildings and
+measured from the PNGs. Terrain, decorations and units are wired in (`src/assets.rs`); buildings and
 UI still use coloured squares.
 
 ### Units – `units/<colour>_units/<kind>/…`
 
-| Kind | Sheet | Frame | Frames | Notes |
+All five colours have the same files. Frames are 192×192 (Lancer: 320×320), one row per sheet.
+The character stands in the middle of the frame with its feet at row 137 (Lancer: 198); sprites
+face right and are flipped for enemies. Wired in through `UnitArt` in `src/assets.rs`: combat uses
+Idle, Run (while sliding to a new tile), Attack (one shot on Strike) and Guard (while Shield up
+lasts); the overworld uses Idle and Run.
+
+| Kind | Animation | File | Frames | Used for |
 |---|---|---|---|---|
-| Warrior | `Warrior_Idle.png` | 192×192 | 8 | |
-| Warrior | `Warrior_Run.png` | 192×192 | 6 | |
-| Warrior | `Warrior_Attack1.png` / `Attack2` | 192×192 | 4 | Strike animation |
-| Warrior | `Warrior_Guard.png` | 192×192 | ? | Use for **Shield up** |
-| Archer | `Archer_Idle.png` | 192×192 | 6 | |
-| Archer | `Archer_Run.png` | 192×192 | 6 | |
-| Archer | `Archer_Shoot.png` | 192×192 | 8 | + `Arrow.png` 64×64 projectile |
-| Lancer | `Lancer_Idle.png` | 320×320 | 12 | Bigger frame than the others |
-| Lancer | `Lancer_Run.png` | 320×320 | ? | |
-| Lancer | `Lancer_<Dir>_Attack.png` / `_Defence.png` | 320×320 | 3 | Dir = Down, DownRight, Right, UpRight, Up |
-| Monk | `Idle.png` / `Run.png` | 192×192 | 6 | |
-| Monk | `Heal.png` + `Heal_Effect.png` | 192×192 | 11 | Future heal action |
-| Pawn | `Pawn_Idle.png` / `Pawn_Run.png` | 192×192 | 8 / 6 | Variants carrying Axe, Hammer, Knife, Pickaxe, Gold, Meat, Wood |
+| Warrior | Idle | `warrior/warrior_idle.png` | 8 | standing |
+| Warrior | Run | `warrior/warrior_run.png` | 6 | Move, hero walking |
+| Warrior | Attack | `warrior/warrior_attack1.png` | 4 | Strike |
+| Warrior | Attack 2 | `warrior/warrior_attack2.png` | 4 | not used yet |
+| Warrior | Guard | `warrior/warrior_guard.png` | 6 | Shield up |
+| Archer | Idle | `archer/archer_idle.png` | 6 | standing, Shield up (no guard sheet) |
+| Archer | Run | `archer/archer_run.png` | 4 | Move |
+| Archer | Shoot | `archer/archer_shoot.png` | 8 | Strike |
+| Archer | Arrow | `archer/arrow.png` | 1 (64×64) | projectile flying to the target on Strike |
+| Lancer | Idle | `lancer/lancer_idle.png` | 12 | standing |
+| Lancer | Run | `lancer/lancer_run.png` | 6 | Move |
+| Lancer | Attack | `lancer/lancer_right_attack.png` | 3 | Strike (also `_up_`, `_down_`, `_up_right_`, `_down_right_` variants, 3 frames each) |
+| Lancer | Defence | `lancer/lancer_right_defence.png` | 6 | Shield up (same directional variants) |
+| Monk | Idle | `monk/idle.png` | 6 | standing, Shield up |
+| Monk | Run | `monk/run.png` | 4 | Move |
+| Monk | Heal | `monk/heal.png` + `monk/heal_effect.png` | 11 | Strike for now; the future heal action |
+| Pawn | Idle | `pawn/pawn_idle.png` | 8 | standing, Shield up |
+| Pawn | Run | `pawn/pawn_run.png` | 6 | Move |
+| Pawn | Interact | `pawn/pawn_interact_knife.png` | 4 | Strike (`_axe` 6, `_hammer` 3, `_pickaxe` 6 frames) |
+| Pawn | Carrying | `pawn/pawn_idle_<axe,gold,hammer,knife,meat,pickaxe,wood>.png`, `pawn_run_<…>.png` | 8 / 6 | not used yet |
 
 Aseprite sources (Blue only) are in `units/units_aseprite_in_blue_only/`.
 
@@ -391,8 +429,8 @@ Aseprite sources (Blue only) are in `units/units_aseprite_in_blue_only/`.
 
 ### Buildings – `buildings/<colour>_buildings/…`
 
-Castle 320×256, Barracks 192×256, Tower 128×256, Archery, Monastery, House1–3. Castle / Barracks /
-Monastery are natural **recruitment points**.
+Castle 320×256, Barracks 192×256, Tower 128×256 (base at row 230, wired in), Archery, Monastery,
+House1–3. The base buildings are still coloured squares.
 
 ### UI – `ui_elements/ui_elements/…`
 
@@ -401,7 +439,16 @@ HP bars), Banners, Ribbons, Papers, Cursors 64×64, Human Avatars, Icons.
 
 ### Particle FX – `particle_fx/…`
 
-Explosion 192×192 × 8, Dust 64×64 × 8, Fire, Water Splash – for hits and deaths.
+Sprite-sheet effects, played once by `spawn_effect` in `src/assets.rs` (Bevy has no built-in particle
+system; the pack's effects are frame strips, so none is needed).
+
+| Effect | File | Frame | Frames | Used for |
+|---|---|---|---|---|
+| Dust 1 | `dust_01.png` | 64 | 8 | second stage of a tower capture |
+| Dust 2 | `dust_02.png` | 64 | 10 | **death of a stack** (only when its last unit dies), timed to the blow landing or the arrow arriving; first stage of a tower capture |
+| Explosion 1 / 2 | `explosion_01.png`, `explosion_02.png` | 192 | 8 / 10 | 2: first stage of a tower capture |
+| Fire 1 / 2 / 3 | `fire_01..03.png` | 64 | 8 / 10 / 12 | – |
+| Water splash | `water_splash.png` | 192 | 9 | – |
 
 ---
 
@@ -415,6 +462,10 @@ Explosion 192×192 × 8, Dust 64×64 × 8, Fire, Water Splash – for hits and d
 - [ ] Heal for Monk
 - [ ] Kingdom-specific unit stats (Red heavy, Purple swarm, Yellow glass cannon)
 - [ ] Smarter enemy AI in combat (Unstack / Merge / Shield up)
-- [ ] AI armies that path around water; AI kingdoms that attack
+- [x] AI armies and bandits path around water and use stairs; armies retreat and refill
+- [ ] AI kingdoms that attack
 - [x] Terrain tiles, cliffs, stairs and decorations from the sprite map
-- [ ] Unit, building and UI sprites; water foam
+- [x] Unit sprites with idle / run / attack / guard
+- [x] Arrows and death dust
+- [x] Tower sprites and capture animation
+- [ ] Base building and UI sprites; water foam; hit and heal effects

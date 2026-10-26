@@ -17,6 +17,8 @@ pub enum BuildingKind {
     Archery,
     Barracks,
     Monastery,
+    /// Towers are not part of a base; the variant is kept for its colour and name.
+    #[allow(dead_code)]
     Tower,
 }
 

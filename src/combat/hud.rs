@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
+use super::actions::Dying;
 use super::grid::{BattleGrid, GridPos, Tile};
 use super::turn::{AP_PER_TURN, ActionPoints, ActiveStack, CombatResult, TurnOrder};
 use crate::faction::Faction;
@@ -159,7 +160,7 @@ pub fn refresh_turn_strip(
     mut commands: Commands,
     order: Res<TurnOrder>,
     strip: Single<Entity, With<TurnStrip>>,
-    stacks: Query<(&Stack, &Team, &Faction)>,
+    stacks: Query<(&Stack, &Team, &Faction), Without<Dying>>,
     changed_stacks: Query<(), Changed<Stack>>,
     newly_active: Query<(), Added<ActiveStack>>,
     mut removed: RemovedComponents<Stack>,
@@ -218,7 +219,7 @@ pub fn refresh_turn_strip(
 fn describe(stack: &Stack, team: Team, faction: Faction, shield: Option<&ShieldUp>) -> String {
     let s = stack.stats();
     let shield = shield.map_or(String::new(), |sh| format!("  SHIELD +{}", sh.0));
-    let range = if stack.is_ranged() { format!("  range {}", s.range) } else { String::new() };
+    let range = if stack.is_ranged() { format!("  range {}-{}", s.range.0, s.range.1) } else { String::new() };
     format!(
         "{} {} x{}  ({})  HP {}/{}  def {}  speed {}  dmg {}-{} ({} roll){}{}",
         team.label(),
@@ -283,7 +284,7 @@ pub fn refresh_panel(
     }
     lines.push(String::new());
     lines.push("Green border = YOUR stacks     Red border = ENEMY stacks".to_string());
-    lines.push("Click a lit tile: Move   Click an enemy: Strike (melee: touching, not diagonal; archers: in range, not engaged)".to_string());
+    lines.push("Click a lit tile: Move   Click an enemy: Strike (melee: touching, not diagonal; archers: 2-4 tiles away)".to_string());
     lines.push("Click an own touching stack of the same kind: Merge   1: Unstack   3: Shield up   Space: End turn".to_string());
     panel.0 = lines.join("\n");
 

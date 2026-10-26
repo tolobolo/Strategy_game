@@ -5,15 +5,24 @@ use bevy::prelude::*;
 use rand::Rng;
 
 use super::interact::{Nearby, start_fight};
+use super::terrain::TerrainMap;
 use super::world::{EncounterSource, WorldState};
-use super::{Hero, label};
+use super::{Hero, OVERWORLD_UNIT_SCALE, UNIT_FEET, label};
+use crate::assets::{UnitArt, UnitVisual};
 use crate::faction::Faction;
 use crate::states::GameState;
 use crate::units::{Army, PlayerArmy, UnitKind};
 
 pub const AI_ARMIES_PER_KINGDOM: usize = 2;
+/// An AI army stands at a tower this long before it falls...
+pub const TOWER_CAPTURE_SECS: f32 = 10.0;
+/// ...then waits for the capture animation before walking on.
+pub const TOWER_LEAVE_SECS: f32 = 1.5;
 pub const AI_ARMY_SPEED: f32 = 80.0;
 pub const AI_RESPAWN_SECS: f32 = 60.0;
+/// An army with fewer units than this goes home after a capture, rests `AI_RESPAWN_SECS` and
+/// comes back with a fresh army.
+pub const AI_RETREAT_BELOW: u32 = 5;
 /// Share of an AI army that stays behind when it takes a tower.
 pub const TOWER_TAKE_LOSS: (f32, f32) = (0.10, 0.30);
 pub const BANDIT_COUNT: usize = 4;
@@ -25,13 +34,31 @@ pub const BANDIT_GOLD: (u32, u32) = (10, 40);
 pub const TOUCH_DISTANCE: f32 = 40.0;
 const SQUARE: f32 = 40.0;
 
-/// A kingdom's roaming army. Walks to the nearest tower it does not own and takes it.
+/// What a roaming AI army is doing right now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AiArmyState {
+    Walking,
+    /// Standing at its target tower; seconds until it falls.
+    Capturing(f32),
+    /// Watching the capture animation; seconds until it walks on.
+    Leaving(f32),
+    /// Too few units left: walking back to its castle.
+    Returning,
+    /// At the castle; seconds until it has a fresh army.
+    Resting(f32),
+}
+
+/// A kingdom's roaming army. Walks (A*, same rules as the hero) to the nearest reachable tower it
+/// does not own, stands there for `TOWER_CAPTURE_SECS`, takes it, and moves on.
 #[derive(Clone, Debug)]
 pub struct AiArmy {
     pub faction: Faction,
     pub pos: Vec2,
     pub army: Army,
     pub target: Option<usize>,
+    /// Tiles still to walk, first one next.
+    pub path: Vec<IVec2>,
+    pub state: AiArmyState,
     pub alive: bool,
     pub respawn_in: f32,
 }
@@ -42,7 +69,8 @@ pub struct BanditSquad {
     pub pos: Vec2,
     pub army: Army,
     pub gold: u32,
-    pub target: Vec2,
+    /// Tiles still to walk, first one next. Empty = pick a new wander target.
+    pub path: Vec<IVec2>,
     pub alive: bool,
     pub respawn_in: f32,
 }
@@ -95,6 +123,8 @@ pub fn initial_ai_armies(world: &WorldState, rng: &mut impl Rng) -> Vec<AiArmy> 
                 pos: home + Vec2::new(i as f32 * 30.0 - 15.0, 0.0),
                 army: random_ai_army(faction, rng),
                 target: None,
+                path: Vec::new(),
+                state: AiArmyState::Walking,
                 alive: true,
                 respawn_in: 0.0,
             });
@@ -112,7 +142,7 @@ pub fn initial_bandits(world: &WorldState, rng: &mut impl Rng) -> Vec<BanditSqua
                 pos,
                 army: random_bandit_army(rng),
                 gold: rng.random_range(BANDIT_GOLD.0..=BANDIT_GOLD.1),
-                target: pos,
+                path: Vec::new(),
                 alive: true,
                 respawn_in: 0.0,
             }
@@ -122,26 +152,23 @@ pub fn initial_bandits(world: &WorldState, rng: &mut impl Rng) -> Vec<BanditSqua
 
 // ---------- entities ----------
 
-pub fn spawn_ai_army_entity(commands: &mut Commands, army: &AiArmy, index: usize) {
+pub fn spawn_ai_army_entity(commands: &mut Commands, art: &mut UnitArt, army: &AiArmy, index: usize) {
     commands.spawn((
         AiArmyMarker(index),
         army.faction,
-        Sprite::from_color(army.faction.color(), Vec2::splat(SQUARE)),
         Transform::from_translation(army.pos.extend(3.0)),
+        Visibility::default(),
         DespawnOnExit(GameState::Overworld),
         children![
-            (
-                Sprite::from_color(Color::WHITE, Vec2::splat(SQUARE + 6.0)),
-                Transform::from_xyz(0.0, 0.0, -0.1),
-                Pickable::IGNORE,
-            ),
-            (ArmyLabel, label(army_text(army.faction, &army.army), Color::WHITE, Vec2::new(0.0, SQUARE))),
+            art.bundle(UnitVisual::new(army.faction, UnitKind::Warrior, false), OVERWORLD_UNIT_SCALE, UNIT_FEET, 0.1),
+            (ArmyLabel, label(army_text(army.faction, &army.army, army.state), Color::WHITE, Vec2::new(0.0, SQUARE))),
         ],
     ));
 }
 
 pub fn spawn_bandit_entity(
     commands: &mut Commands,
+    art: &mut UnitArt,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ColorMaterial>,
     squad: &BanditSquad,
@@ -150,10 +177,11 @@ pub fn spawn_bandit_entity(
     commands.spawn((
         BanditMarker(index),
         Faction::Black,
-        Sprite::from_color(Faction::Black.color(), Vec2::splat(SQUARE)),
         Transform::from_translation(squad.pos.extend(3.0)),
+        Visibility::default(),
         DespawnOnExit(GameState::Overworld),
         children![
+            art.bundle(UnitVisual::new(Faction::Black, UnitKind::Warrior, false), OVERWORLD_UNIT_SCALE, UNIT_FEET, 0.1),
             (
                 Mesh2d(meshes.add(Circle::new(BANDIT_VISION))),
                 MeshMaterial2d(materials.add(Color::srgba(1.0, 0.2, 0.2, 0.12))),
@@ -164,8 +192,15 @@ pub fn spawn_bandit_entity(
     ));
 }
 
-fn army_text(faction: Faction, army: &Army) -> String {
-    format!("{} army\n{}", faction.name(), army.summary())
+fn army_text(faction: Faction, army: &Army, state: AiArmyState) -> String {
+    let doing = match state {
+        AiArmyState::Walking => String::new(),
+        AiArmyState::Capturing(left) => format!("\ncapturing... {}s", left.ceil() as u32),
+        AiArmyState::Leaving(_) => "\ntaken!".to_string(),
+        AiArmyState::Returning => "\nreturning home".to_string(),
+        AiArmyState::Resting(left) => format!("\nresting... {}s", left.ceil() as u32),
+    };
+    format!("{} army\n{}{doing}", faction.name(), army.summary())
 }
 
 fn bandit_text(squad: &BanditSquad) -> String {
@@ -174,8 +209,26 @@ fn bandit_text(squad: &BanditSquad) -> String {
 
 // ---------- systems (Update, Overworld) ----------
 
-/// AI armies walk to the nearest tower they do not own and take it by touching it, leaving
-/// 10–30 % of their units behind as the tower's garrison. They never fight.
+/// Walk along `path` at `speed`, popping waypoints as they are reached. True when nothing is left.
+fn follow_path(pos: &mut Vec2, path: &mut Vec<IVec2>, terrain: &TerrainMap, speed: f32, dt: f32) -> bool {
+    let Some(&next) = path.first() else { return true };
+    let goal = terrain.world_pos(next);
+    let to_goal = goal - *pos;
+    let step = speed * dt;
+    if to_goal.length() <= step {
+        *pos = goal;
+        path.remove(0);
+        path.is_empty()
+    } else {
+        *pos += to_goal.normalize() * step;
+        false
+    }
+}
+
+/// AI armies path (A*, same rules as the hero: no water, layers only via stairs) to the nearest
+/// reachable tower they do not own, stand at it for `TOWER_CAPTURE_SECS`, take it (leaving
+/// 10–30 % of their units behind as the garrison), wait for the capture animation and walk on.
+/// With fewer than `AI_RETREAT_BELOW` units they go home, rest and come back fresh. They never fight.
 pub fn ai_armies_act(
     time: Res<Time>,
     mut world: ResMut<WorldState>,
@@ -183,33 +236,99 @@ pub fn ai_armies_act(
 ) {
     let dt = time.delta_secs();
     let mut rng = rand::rng();
-    let WorldState { armies, towers, terrain, .. } = &mut *world;
+    let WorldState { armies, towers, terrain, bases, .. } = &mut *world;
 
     for army in armies.iter_mut().filter(|a| a.alive) {
+        let here = terrain.tile_of(army.pos);
+        let home_tile = bases.iter().find(|b| b.home == army.faction).map(|b| b.spawn_tile());
+        // Standing at a tower: count down, take it, then watch the animation before leaving.
+        match army.state {
+            AiArmyState::Capturing(left) => {
+                let left = left - dt;
+                if left > 0.0 {
+                    army.state = AiArmyState::Capturing(left);
+                } else if let Some(t) = army.target {
+                    let share = rng.random_range(TOWER_TAKE_LOSS.0..=TOWER_TAKE_LOSS.1);
+                    let left_behind = army.army.split_off_fraction(share);
+                    towers[t].change_owner(army.faction, left_behind);
+                    army.target = None;
+                    army.state = AiArmyState::Leaving(TOWER_LEAVE_SECS);
+                    if army.army.is_empty() {
+                        army.alive = false;
+                        army.respawn_in = AI_RESPAWN_SECS;
+                    }
+                }
+                continue;
+            }
+            AiArmyState::Leaving(left) => {
+                let left = left - dt;
+                if left > 0.0 {
+                    army.state = AiArmyState::Leaving(left);
+                } else if army.army.slots() < AI_RETREAT_BELOW {
+                    // Too weak to go on: head home.
+                    army.path = home_tile.and_then(|h| terrain.find_path(here, h)).unwrap_or_default();
+                    army.state = AiArmyState::Returning;
+                } else {
+                    army.state = AiArmyState::Walking;
+                }
+                continue;
+            }
+            AiArmyState::Returning => {
+                if follow_path(&mut army.pos, &mut army.path, terrain, AI_ARMY_SPEED, dt) {
+                    army.state = AiArmyState::Resting(AI_RESPAWN_SECS);
+                }
+                continue;
+            }
+            AiArmyState::Resting(left) => {
+                let left = left - dt;
+                if left > 0.0 {
+                    army.state = AiArmyState::Resting(left);
+                } else {
+                    army.army = random_ai_army(army.faction, &mut rng);
+                    army.target = None;
+                    army.path.clear();
+                    army.state = AiArmyState::Walking;
+                }
+                continue;
+            }
+            AiArmyState::Walking => {}
+        }
+
+        // Pick the nearest tower by walking distance; towers nobody can reach are skipped.
         let target_still_valid = army.target.is_some_and(|t| towers[t].owner != army.faction);
         if !target_still_valid {
-            army.target = towers
+            let best = towers
                 .iter()
                 .enumerate()
                 .filter(|(_, t)| t.owner != army.faction)
-                .min_by_key(|(_, t)| terrain.world_pos(t.tile).distance(army.pos) as i32)
-                .map(|(i, _)| i);
+                .filter_map(|(i, t)| terrain.find_path(here, t.tile).map(|p| (i, p)))
+                .min_by_key(|(_, p)| p.len());
+            match best {
+                Some((i, path)) => {
+                    army.target = Some(i);
+                    army.path = path;
+                }
+                None => {
+                    army.target = None;
+                    army.path.clear();
+                    continue; // nothing reachable: stand where we are
+                }
+            }
         }
         let Some(t) = army.target else { continue };
         let goal = terrain.world_pos(towers[t].tile);
-        let to_goal = goal - army.pos;
-        if to_goal.length() <= TOUCH_DISTANCE {
-            let share = rng.random_range(TOWER_TAKE_LOSS.0..=TOWER_TAKE_LOSS.1);
-            let left_behind = army.army.split_off_fraction(share);
-            towers[t].owner = army.faction;
-            towers[t].garrison = left_behind;
-            army.target = None;
-            if army.army.is_empty() {
-                army.alive = false;
-                army.respawn_in = AI_RESPAWN_SECS;
+        if army.path.is_empty() && goal.distance(army.pos) > TOUCH_DISTANCE {
+            // Pushed off course (e.g. restored after a fight): plan again.
+            match terrain.find_path(here, towers[t].tile) {
+                Some(path) => army.path = path,
+                None => {
+                    army.target = None;
+                    continue;
+                }
             }
-        } else {
-            army.pos += to_goal.normalize() * AI_ARMY_SPEED * dt;
+        }
+        if follow_path(&mut army.pos, &mut army.path, terrain, AI_ARMY_SPEED, dt) {
+            army.state = AiArmyState::Capturing(TOWER_CAPTURE_SECS);
         }
     }
 
@@ -220,7 +339,7 @@ pub fn ai_armies_act(
     }
 }
 
-/// Bandits drift between random walkable points.
+/// Bandits drift between random reachable points, pathing like everyone else.
 pub fn bandits_wander(
     time: Res<Time>,
     mut world: ResMut<WorldState>,
@@ -231,19 +350,18 @@ pub fn bandits_wander(
     let WorldState { bandits, terrain, bases, .. } = &mut *world;
 
     for squad in bandits.iter_mut().filter(|b| b.alive) {
-        let to_target = squad.target - squad.pos;
-        if to_target.length() < 8.0 {
+        if squad.path.is_empty() {
             let here = terrain.tile_of(squad.pos);
             for _ in 0..20 {
                 let candidate = here + IVec2::new(rng.random_range(-8..=8), rng.random_range(-8..=8));
                 let ok = terrain.get(candidate).is_some_and(|t| t.walkable()) && !bases.iter().any(|b| b.contains(candidate));
-                if ok {
-                    squad.target = terrain.world_pos(candidate);
+                if ok && let Some(path) = terrain.find_path(here, candidate) && !path.is_empty() {
+                    squad.path = path;
                     break;
                 }
             }
         } else {
-            squad.pos += to_target.normalize() * BANDIT_SPEED * dt;
+            follow_path(&mut squad.pos, &mut squad.path, terrain, BANDIT_SPEED, dt);
         }
     }
 
@@ -257,6 +375,7 @@ pub fn bandits_wander(
 /// Despawn beaten roamers, tick their timers and bring them back when the time is up.
 pub fn respawn_roamers(
     mut commands: Commands,
+    mut art: UnitArt,
     time: Res<Time>,
     mut world: ResMut<WorldState>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -301,7 +420,9 @@ pub fn respawn_roamers(
         army.pos = home;
         army.army = fresh;
         army.target = None;
-        spawn_ai_army_entity(&mut commands, army, i);
+        army.path.clear();
+        army.state = AiArmyState::Walking;
+        spawn_ai_army_entity(&mut commands, &mut art, army, i);
     }
 
     let hero_tile = world.terrain.tile_of(hero.translation.truncate());
@@ -320,11 +441,11 @@ pub fn respawn_roamers(
             pos,
             army: random_bandit_army(&mut rng),
             gold: rng.random_range(BANDIT_GOLD.0..=BANDIT_GOLD.1),
-            target: pos,
+            path: Vec::new(),
             alive: true,
             respawn_in: 0.0,
         };
-        spawn_bandit_entity(&mut commands, &mut meshes, &mut materials, squad, i);
+        spawn_bandit_entity(&mut commands, &mut art, &mut meshes, &mut materials, squad, i);
     }
 }
 
@@ -346,7 +467,7 @@ pub fn refresh_army_labels(
     };
     for (marker, children) in &ai {
         let army = &world.armies[marker.0];
-        set(children, army_text(army.faction, &army.army));
+        set(children, army_text(army.faction, &army.army, army.state));
     }
     for (marker, children) in &bandits {
         set(children, bandit_text(&world.bandits[marker.0]));

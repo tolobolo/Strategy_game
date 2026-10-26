@@ -25,6 +25,7 @@ impl Plugin for CombatPlugin {
             .add_systems(
                 Update,
                 (
+                    actions::tick_action_lock,
                     actions::player_input,
                     actions::enemy_ai,
                     actions::resolve_actions,
@@ -41,6 +42,9 @@ impl Plugin for CombatPlugin {
                     hud::refresh_panel,
                     hud::follow_active_marker,
                     hud::highlight_reachable_tiles,
+                    actions::tween_stack_moves,
+                    actions::fly_projectiles,
+                    actions::shield_visuals,
                 )
                     .run_if(in_state(GameState::Combat)),
             )

@@ -29,8 +29,9 @@ pub struct UnitStats {
     pub speed: u32,
     /// Damage range `(min, max)`, rolled by every other unit in the stack.
     pub damage: (u32, u32),
-    /// Strike range in tiles. 1 = melee (must be orthogonally adjacent).
-    pub range: u32,
+    /// Strike range in tiles as `(min, max)`, like damage. `(1, 1)` is melee: the target must be
+    /// orthogonally adjacent. Ranged kinds cannot hit anything closer than `min`.
+    pub range: (u32, u32),
 }
 
 impl UnitKind {
@@ -45,11 +46,11 @@ impl UnitKind {
 
     pub fn stats(self) -> UnitStats {
         match self {
-            UnitKind::Warrior => UnitStats { health: 10, defence: 3, speed: 3, damage: (3, 5), range: 1 },
-            UnitKind::Archer => UnitStats { health: 6, defence: 1, speed: 3, damage: (2, 4), range: 6 },
-            UnitKind::Lancer => UnitStats { health: 12, defence: 4, speed: 2, damage: (4, 6), range: 1 },
-            UnitKind::Monk => UnitStats { health: 7, defence: 2, speed: 3, damage: (1, 2), range: 1 },
-            UnitKind::Pawn => UnitStats { health: 4, defence: 0, speed: 4, damage: (1, 3), range: 1 },
+            UnitKind::Warrior => UnitStats { health: 10, defence: 3, speed: 3, damage: (3, 5), range: (1, 1) },
+            UnitKind::Archer => UnitStats { health: 6, defence: 1, speed: 3, damage: (2, 4), range: (2, 4) },
+            UnitKind::Lancer => UnitStats { health: 12, defence: 4, speed: 2, damage: (4, 6), range: (1, 1) },
+            UnitKind::Monk => UnitStats { health: 7, defence: 2, speed: 3, damage: (1, 2), range: (1, 1) },
+            UnitKind::Pawn => UnitStats { health: 4, defence: 0, speed: 4, damage: (1, 3), range: (1, 1) },
         }
     }
 
@@ -114,7 +115,7 @@ impl Stack {
     }
 
     pub fn is_ranged(&self) -> bool {
-        self.stats().range > 1
+        self.stats().range.1 > 1
     }
 
     /// Compact label such as `W x12`.

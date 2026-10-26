@@ -1,7 +1,14 @@
 //! Handles to the Tiny Swords art. Paths are relative to `assets/` (agents.md §5).
-//! Units and buildings are still coloured squares; terrain and decorations use real sprites.
+//! Terrain, decorations and units use real sprites; buildings and UI are still coloured squares.
 
+use std::collections::HashMap;
+
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use bevy::sprite::Anchor;
+
+use crate::faction::Faction;
+use crate::units::UnitKind;
 
 /// Every tile sheet is 9 columns × 6 rows of 64×64 tiles.
 pub const TILESHEET_COLS: u32 = 9;
@@ -33,6 +40,50 @@ pub struct GameAssets {
     pub rocks: [Handle<Image>; 4],
     pub water_rocks: [Strip; 4],
     pub duck: Strip,
+    /// One-shot particle effects from `particle_fx/`, indexed by `Fx`.
+    pub fx: HashMap<Fx, Strip>,
+    /// `buildings/<colour>_buildings/tower.png` per faction (128×256, base at row 230).
+    pub towers: HashMap<Faction, Handle<Image>>,
+}
+
+/// Scale and foot anchor of the tower sprite so it stands on its tile.
+pub const TOWER_SCALE: f32 = 0.55;
+pub const TOWER_ANCHOR: Anchor = Anchor(Vec2::new(0.0, -0.40));
+
+/// The sprite-sheet particle effects in the pack. Play one with `spawn_effect`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Fx {
+    Dust1,
+    /// Used for a stack's death.
+    Dust2,
+    Explosion1,
+    Explosion2,
+    Fire1,
+    Fire2,
+    Fire3,
+    WaterSplash,
+}
+
+impl Fx {
+    pub const ALL: [Fx; 8] = [Fx::Dust1, Fx::Dust2, Fx::Explosion1, Fx::Explosion2, Fx::Fire1, Fx::Fire2, Fx::Fire3, Fx::WaterSplash];
+
+    /// File, frame size and frame count (measured).
+    fn sheet(self) -> (&'static str, u32, u32) {
+        match self {
+            Fx::Dust1 => ("particle_fx/dust_01.png", 64, 8),
+            Fx::Dust2 => ("particle_fx/dust_02.png", 64, 10),
+            Fx::Explosion1 => ("particle_fx/explosion_01.png", 192, 8),
+            Fx::Explosion2 => ("particle_fx/explosion_02.png", 192, 10),
+            Fx::Fire1 => ("particle_fx/fire_01.png", 64, 8),
+            Fx::Fire2 => ("particle_fx/fire_02.png", 64, 10),
+            Fx::Fire3 => ("particle_fx/fire_03.png", 64, 12),
+            Fx::WaterSplash => ("particle_fx/water_splash.png", 192, 9),
+        }
+    }
+
+    pub fn fps(self) -> f32 {
+        12.0
+    }
 }
 
 impl GameAssets {
@@ -66,7 +117,12 @@ impl Plugin for GameAssetsPlugin {
         let server = app.world().resource::<AssetServer>().clone();
         let mut layouts = app.world_mut().resource_mut::<Assets<TextureAtlasLayout>>();
         let assets = load_assets(&server, &mut layouts);
-        app.insert_resource(assets).add_systems(Update, animate_sprites);
+        app.insert_resource(assets)
+            .init_resource::<UnitSprites>()
+            .add_systems(
+                Update,
+                (start_effects, apply_unit_visuals, animate_sprites, finish_one_shots, despawn_finished_effects).chain(),
+            );
     }
 }
 
@@ -110,29 +166,284 @@ fn load_assets(server: &AssetServer, layouts: &mut Assets<TextureAtlasLayout>) -
         )
     });
     assets.duck = strip(server, layouts, "terrain/decorations/rubber_duck/rubber_duck.png", UVec2::splat(32), 3);
+    for fx in Fx::ALL {
+        let (file, frame, frames) = fx.sheet();
+        assets.fx.insert(fx, strip(server, layouts, file, UVec2::splat(frame), frames));
+    }
+    for faction in [Faction::Reclaimers, Faction::Red, Faction::Purple, Faction::Yellow, Faction::Black] {
+        assets.towers.insert(faction, server.load(format!("{}/tower.png", faction.building_dir())));
+    }
     assets
 }
 
-/// Loops an atlas sprite through its frames.
+// ---------- one-shot effects ----------
+
+/// A particle effect waiting for its cue (a sword landing, an arrow arriving).
+#[derive(Component)]
+pub struct PendingEffect {
+    fx: Fx,
+    scale: f32,
+    delay: Timer,
+    /// Entity to despawn when the effect starts (the thing the effect replaces).
+    replaces: Option<Entity>,
+}
+
+/// Marker for a playing effect; despawned when its animation finishes.
+#[derive(Component)]
+pub struct OneShotEffect;
+
+/// Play `fx` at `pos` after `delay` seconds, optionally despawning `replaces` at that moment.
+pub fn spawn_effect(commands: &mut Commands, fx: Fx, pos: Vec2, z: f32, scale: f32, delay: f32, replaces: Option<Entity>) {
+    commands.spawn((
+        PendingEffect { fx, scale, delay: Timer::from_seconds(delay.max(0.0), TimerMode::Once), replaces },
+        Transform::from_translation(pos.extend(z)),
+        Visibility::Hidden,
+        Pickable::IGNORE,
+    ));
+}
+
+/// Turn pending effects into playing sprites when their cue arrives.
+fn start_effects(
+    time: Res<Time>,
+    mut commands: Commands,
+    assets: Res<GameAssets>,
+    mut pending: Query<(Entity, &mut PendingEffect, &mut Transform, &mut Visibility)>,
+) {
+    for (entity, mut effect, mut transform, mut visibility) in &mut pending {
+        if !effect.delay.tick(time.delta()).is_finished() {
+            continue;
+        }
+        if let Some(victim) = effect.replaces
+            && let Ok(mut victim) = commands.get_entity(victim)
+        {
+            victim.despawn();
+        }
+        let strip = &assets.fx[&effect.fx];
+        transform.scale = Vec3::splat(effect.scale);
+        *visibility = Visibility::Visible;
+        commands
+            .entity(entity)
+            .remove::<PendingEffect>()
+            .insert((strip.sprite(), Animated::once(strip.frames, effect.fx.fps()), OneShotEffect));
+    }
+}
+
+fn despawn_finished_effects(mut commands: Commands, effects: Query<(Entity, &Animated), With<OneShotEffect>>) {
+    for (entity, animated) in &effects {
+        if animated.finished {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+// ---------- generic sprite animation ----------
+
+/// Steps an atlas sprite through its frames.
 #[derive(Component)]
 pub struct Animated {
     pub frames: usize,
     pub timer: Timer,
+    /// Stop on the last frame instead of looping.
+    pub once: bool,
+    /// Set when a one-shot animation has reached its last frame.
+    pub finished: bool,
 }
 
 impl Animated {
     pub fn new(frames: usize, fps: f32) -> Self {
-        Self { frames, timer: Timer::from_seconds(1.0 / fps, TimerMode::Repeating) }
+        Self { frames, timer: Timer::from_seconds(1.0 / fps, TimerMode::Repeating), once: false, finished: false }
+    }
+
+    pub fn once(frames: usize, fps: f32) -> Self {
+        Self { once: true, ..Self::new(frames, fps) }
     }
 }
 
 pub fn animate_sprites(time: Res<Time>, mut query: Query<(&mut Animated, &mut Sprite)>) {
     for (mut anim, mut sprite) in &mut query {
-        if anim.frames > 0
-            && anim.timer.tick(time.delta()).just_finished()
-            && let Some(atlas) = sprite.texture_atlas.as_mut()
-        {
+        if anim.frames == 0 || anim.finished || !anim.timer.tick(time.delta()).just_finished() {
+            continue;
+        }
+        let Some(atlas) = sprite.texture_atlas.as_mut() else { continue };
+        if anim.once && atlas.index + 1 >= anim.frames {
+            anim.finished = true;
+        } else {
             atlas.index = (atlas.index + 1) % anim.frames;
+        }
+    }
+}
+
+// ---------- unit sprites ----------
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum UnitAnim {
+    Idle,
+    Run,
+    Attack,
+    Guard,
+}
+
+impl UnitAnim {
+    fn fps(self) -> f32 {
+        match self {
+            UnitAnim::Idle => 8.0,
+            UnitAnim::Run => 10.0,
+            UnitAnim::Attack => 10.0,
+            UnitAnim::Guard => 8.0,
+        }
+    }
+}
+
+/// File (inside `units/<colour>_units/<kind>/`) and frame count of one animation.
+/// Kinds without a sheet for an animation fall back to idle. See the table in agents.md §5.
+fn unit_sheet(kind: UnitKind, anim: UnitAnim) -> (&'static str, u32) {
+    use UnitAnim::*;
+    use UnitKind::*;
+    match (kind, anim) {
+        (Warrior, Idle) => ("warrior/warrior_idle.png", 8),
+        (Warrior, Run) => ("warrior/warrior_run.png", 6),
+        (Warrior, Attack) => ("warrior/warrior_attack1.png", 4),
+        (Warrior, Guard) => ("warrior/warrior_guard.png", 6),
+        (Archer, Idle | Guard) => ("archer/archer_idle.png", 6),
+        (Archer, Run) => ("archer/archer_run.png", 4),
+        (Archer, Attack) => ("archer/archer_shoot.png", 8),
+        (Lancer, Idle) => ("lancer/lancer_idle.png", 12),
+        (Lancer, Run) => ("lancer/lancer_run.png", 6),
+        (Lancer, Attack) => ("lancer/lancer_right_attack.png", 3),
+        (Lancer, Guard) => ("lancer/lancer_right_defence.png", 6),
+        (Monk, Idle | Guard) => ("monk/idle.png", 6),
+        (Monk, Run) => ("monk/run.png", 4),
+        (Monk, Attack) => ("monk/heal.png", 11),
+        (Pawn, Idle | Guard) => ("pawn/pawn_idle.png", 8),
+        (Pawn, Run) => ("pawn/pawn_run.png", 6),
+        (Pawn, Attack) => ("pawn/pawn_interact_knife.png", 4),
+    }
+}
+
+/// How long one pass of an animation takes, in seconds.
+pub fn anim_duration(kind: UnitKind, anim: UnitAnim) -> f32 {
+    let (_, frames) = unit_sheet(kind, anim);
+    frames as f32 / anim.fps()
+}
+
+/// Frame size of a kind's sheets.
+pub fn unit_frame(kind: UnitKind) -> u32 {
+    match kind {
+        UnitKind::Lancer => 320,
+        _ => 192,
+    }
+}
+
+/// Scale that makes the visible character roughly one combat tile tall.
+pub fn unit_scale(kind: UnitKind) -> f32 {
+    match kind {
+        UnitKind::Lancer => 0.45,
+        _ => 0.6,
+    }
+}
+
+/// Anchor at the character's feet (measured: feet at row 137 of 192, row 198 of 320).
+pub fn unit_anchor(kind: UnitKind) -> Anchor {
+    match kind {
+        UnitKind::Lancer => Anchor(Vec2::new(0.0, -0.12)),
+        _ => Anchor(Vec2::new(0.0, -0.21)),
+    }
+}
+
+/// Lazily loaded unit strips, keyed by faction colour, kind and animation.
+#[derive(Resource, Default)]
+pub struct UnitSprites {
+    cache: HashMap<(Faction, UnitKind, UnitAnim), Strip>,
+}
+
+/// What a unit sprite shows. Change it and `apply_unit_visuals` swaps the sheet.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnitVisual {
+    pub faction: Faction,
+    pub kind: UnitKind,
+    pub anim: UnitAnim,
+    /// Play once, then go back to idle.
+    pub once: bool,
+    /// Sheets face right; enemies in combat face left.
+    pub flip_x: bool,
+}
+
+impl UnitVisual {
+    pub fn new(faction: Faction, kind: UnitKind, flip_x: bool) -> Self {
+        Self { faction, kind, anim: UnitAnim::Idle, once: false, flip_x }
+    }
+
+    pub fn play(&mut self, anim: UnitAnim, once: bool) {
+        self.anim = anim;
+        self.once = once;
+    }
+}
+
+/// Everything needed to build a unit sprite, bundled so spawn helpers take one parameter.
+#[derive(SystemParam)]
+pub struct UnitArt<'w> {
+    sprites: ResMut<'w, UnitSprites>,
+    server: Res<'w, AssetServer>,
+    layouts: ResMut<'w, Assets<TextureAtlasLayout>>,
+}
+
+impl UnitArt<'_> {
+    pub fn strip(&mut self, faction: Faction, kind: UnitKind, anim: UnitAnim) -> Strip {
+        let key = (faction, kind, anim);
+        if let Some(strip) = self.sprites.cache.get(&key) {
+            return strip.clone();
+        }
+        let (file, frames) = unit_sheet(kind, anim);
+        let path = format!("{}/{file}", faction.sprite_dir());
+        let strip = strip(&self.server, &mut self.layouts, &path, UVec2::splat(unit_frame(kind)), frames);
+        self.sprites.cache.insert(key, strip.clone());
+        strip
+    }
+
+    /// The arrow projectile of a faction's archers (`archer/arrow.png`, 64×64, points right).
+    pub fn arrow(&mut self, faction: Faction) -> Handle<Image> {
+        self.server.load(format!("{}/archer/arrow.png", faction.sprite_dir()))
+    }
+
+    /// A child entity bundle showing `visual`, feet at `offset` from the parent, at `scale`.
+    pub fn bundle(&mut self, visual: UnitVisual, scale: f32, offset: Vec2, z: f32) -> impl Bundle {
+        let strip = self.strip(visual.faction, visual.kind, visual.anim);
+        let mut sprite = strip.sprite();
+        sprite.flip_x = visual.flip_x;
+        (
+            visual,
+            sprite,
+            Animated::new(strip.frames, visual.anim.fps()),
+            unit_anchor(visual.kind),
+            Transform::from_translation(offset.extend(z)).with_scale(Vec3::splat(scale)),
+            Pickable::IGNORE,
+        )
+    }
+}
+
+/// Swap the sheet whenever a `UnitVisual` changes.
+fn apply_unit_visuals(
+    mut art: UnitArt,
+    mut query: Query<(&UnitVisual, &mut Sprite, &mut Animated), Changed<UnitVisual>>,
+) {
+    for (visual, mut sprite, mut animated) in &mut query {
+        let strip = art.strip(visual.faction, visual.kind, visual.anim);
+        sprite.image = strip.image;
+        sprite.texture_atlas = Some(TextureAtlas { layout: strip.layout, index: 0 });
+        sprite.flip_x = visual.flip_x;
+        *animated = if visual.once {
+            Animated::once(strip.frames, visual.anim.fps())
+        } else {
+            Animated::new(strip.frames, visual.anim.fps())
+        };
+    }
+}
+
+/// One-shot animations (attacks) return to idle when they end.
+fn finish_one_shots(mut query: Query<(&mut UnitVisual, &Animated)>) {
+    for (mut visual, animated) in &mut query {
+        if visual.once && animated.finished {
+            visual.play(UnitAnim::Idle, false);
         }
     }
 }

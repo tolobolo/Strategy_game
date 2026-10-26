@@ -3,10 +3,11 @@
 use bevy::prelude::*;
 use rand::seq::SliceRandom;
 
-use super::actions::CombatAction;
+use super::actions::{ActionLock, CombatAction};
 use super::grid::{BattleGrid, GRID_COLS, GRID_ROWS, GridPos, TILE_SIZE, Tile};
 use super::hud::{ActiveMarker, CombatLog, CountLabel, Hovered, count_text};
 use super::turn::{ActiveStack, TurnOrder};
+use crate::assets::{UnitArt, UnitVisual, unit_scale};
 use crate::faction::Faction;
 use crate::overworld::PendingEncounter;
 use crate::states::{CombatPhase, GameState};
@@ -14,6 +15,7 @@ use crate::units::{Army, PlayerArmy, Stack, Team};
 
 pub fn spawn_battle(
     mut commands: Commands,
+    mut art: UnitArt,
     encounter: Res<PendingEncounter>,
     player_army: Res<PlayerArmy>,
     mut camera: Single<&mut Transform, With<Camera2d>>,
@@ -24,6 +26,7 @@ pub fn spawn_battle(
 
     let grid = BattleGrid { cols: GRID_COLS, rows: GRID_ROWS, tile_size: TILE_SIZE };
     commands.insert_resource(grid);
+    commands.insert_resource(ActionLock::default());
 
     let mut log = CombatLog::default();
     log.push(format!(
@@ -48,8 +51,8 @@ pub fn spawn_battle(
     }
 
     let mut order = Vec::new();
-    place_army(&mut commands, &grid, Team::Player, &player_army.0, &mut order);
-    place_army(&mut commands, &grid, Team::Enemy, &encounter.enemy, &mut order);
+    place_army(&mut commands, &mut art, &grid, Team::Player, &player_army.0, &mut order);
+    place_army(&mut commands, &mut art, &grid, Team::Enemy, &encounter.enemy, &mut order);
     order.shuffle(&mut rand::rng());
     commands.insert_resource(TurnOrder { order, current: 0 });
 
@@ -69,6 +72,7 @@ pub fn spawn_battle(
 /// Player stacks fill the left columns, enemy stacks the right ones, centred vertically.
 fn place_army(
     commands: &mut Commands,
+    art: &mut UnitArt,
     grid: &BattleGrid,
     team: Team,
     army: &Army,
@@ -82,54 +86,44 @@ fn place_army(
     for (i, stack) in stacks.into_iter().enumerate() {
         let col = columns[(i / per_column) % columns.len()];
         let row = first_row + (i % per_column) as i32;
-        let entity = spawn_stack(commands, grid, team, army.faction, *stack, GridPos::new(col, row));
+        let entity = spawn_stack(commands, art, grid, team, army.faction, *stack, GridPos::new(col, row));
         order.push(entity);
     }
 }
 
-/// One stack = a faction-coloured square with a team-coloured border and three labels.
-/// To use real art, replace the `Sprite::from_color` on the parent with `Sprite::from_atlas_image`.
+/// One stack = a translucent team-coloured plate (this is what you click), the animated unit
+/// sprite of its kind in the faction's colour on top, a count/HP label below and a YOU/ENEMY tag.
 pub fn spawn_stack(
     commands: &mut Commands,
+    art: &mut UnitArt,
     grid: &BattleGrid,
     team: Team,
     faction: Faction,
     stack: Stack,
     pos: GridPos,
 ) -> Entity {
-    let size = grid.tile_size * 0.68;
+    let size = grid.tile_size * 0.9;
+    let plate = team.color().to_srgba();
+    let visual = UnitVisual::new(faction, stack.kind, team == Team::Enemy);
     commands
         .spawn((
             stack,
             team,
             faction,
             pos,
-            Sprite::from_color(faction.color(), Vec2::splat(size)),
+            Sprite::from_color(Color::srgba(plate.red, plate.green, plate.blue, 0.35), Vec2::splat(size)),
             Transform::from_translation(grid.to_world(pos).extend(1.0)),
             Pickable::default(),
             DespawnOnExit(GameState::Combat),
             children![
-                // Team border: a slightly bigger square behind the fill.
-                (
-                    Sprite::from_color(team.color(), Vec2::splat(size + 10.0)),
-                    Transform::from_xyz(0.0, 0.0, -0.1),
-                    Pickable::IGNORE,
-                ),
-                // Kind initial.
-                (
-                    Text2d::new(stack.kind.initial().to_string()),
-                    TextFont { font_size: FontSize::Px(30.0), ..default() },
-                    TextColor(faction.text_color()),
-                    Transform::from_xyz(0.0, 1.0, 0.1),
-                    Pickable::IGNORE,
-                ),
+                art.bundle(visual, unit_scale(stack.kind), Vec2::new(0.0, -size * 0.3), 0.1),
                 // Count and lead-unit HP, refreshed by hud::refresh_stack_labels.
                 (
                     CountLabel,
                     Text2d::new(count_text(&stack)),
-                    TextFont { font_size: FontSize::Px(12.0), ..default() },
+                    TextFont { font_size: FontSize::Px(11.0), ..default() },
                     TextColor(Color::WHITE),
-                    Transform::from_xyz(0.0, -size / 2.0 - 12.0, 0.1),
+                    Transform::from_xyz(0.0, -size / 2.0 + 7.0, 0.2),
                     Pickable::IGNORE,
                 ),
                 // YOU / ENEMY tag.
@@ -137,7 +131,7 @@ pub fn spawn_stack(
                     Text2d::new(team.label()),
                     TextFont { font_size: FontSize::Px(12.0), ..default() },
                     TextColor(team.color()),
-                    Transform::from_xyz(0.0, size / 2.0 + 13.0, 0.1),
+                    Transform::from_xyz(0.0, size / 2.0 + 8.0, 0.2),
                     Pickable::IGNORE,
                 ),
             ],
@@ -148,17 +142,18 @@ pub fn spawn_stack(
         .id()
 }
 
-fn player_is_active(active: &Query<&Team, With<ActiveStack>>) -> bool {
-    matches!(active.single(), Ok(Team::Player))
+fn player_may_act(active: &Query<&Team, With<ActiveStack>>, lock: &ActionLock) -> bool {
+    !lock.is_locked() && matches!(active.single(), Ok(Team::Player))
 }
 
 fn on_tile_click(
     click: On<Pointer<Click>>,
     tiles: Query<&GridPos, With<Tile>>,
     active: Query<&Team, With<ActiveStack>>,
+    lock: Res<ActionLock>,
     mut actions: MessageWriter<CombatAction>,
 ) {
-    if click.event.button != PointerButton::Primary || !player_is_active(&active) {
+    if click.event.button != PointerButton::Primary || !player_may_act(&active, &lock) {
         return;
     }
     if let Ok(pos) = tiles.get(click.entity) {
@@ -170,9 +165,10 @@ fn on_stack_click(
     click: On<Pointer<Click>>,
     active: Query<&Team, With<ActiveStack>>,
     teams: Query<&Team>,
+    lock: Res<ActionLock>,
     mut actions: MessageWriter<CombatAction>,
 ) {
-    if click.event.button != PointerButton::Primary || !player_is_active(&active) {
+    if click.event.button != PointerButton::Primary || !player_may_act(&active, &lock) {
         return;
     }
     match teams.get(click.entity) {

@@ -97,6 +97,31 @@ impl TerrainMap {
         up || down
     }
 
+    /// Shortest 4-neighbour path obeying `can_step` (never water, layer changes only on stairs).
+    /// Returns the tiles after `from` up to and including `to`; `Some(vec![])` when already there,
+    /// `None` when unreachable. A* from the `pathfinding` crate, Manhattan heuristic.
+    pub fn find_path(&self, from: IVec2, to: IVec2) -> Option<Vec<IVec2>> {
+        if from == to {
+            return Some(Vec::new());
+        }
+        if !self.get(to).is_some_and(Terrain::walkable) {
+            return None;
+        }
+        let (path, _cost) = pathfinding::prelude::astar(
+            &from,
+            |&tile| {
+                [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y]
+                    .into_iter()
+                    .map(move |d| tile + d)
+                    .filter(move |&next| self.can_step(tile, next))
+                    .map(|next| (next, 1u32))
+            },
+            |&tile| ((tile - to).abs().x + (tile - to).abs().y) as u32,
+            |&tile| tile == to,
+        )?;
+        Some(path.into_iter().skip(1).collect())
+    }
+
     /// Which quarter of the map a tile is in: 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right.
     /// Each quarter draws its ground with a different tile sheet.
     pub fn quarter(&self, tile: IVec2) -> usize {
@@ -294,6 +319,36 @@ mod tests {
         assert!(map.can_step(mountain, IVec2::new(3, 3)), "walking on the plateau");
         assert!(!map.can_step(IVec2::new(3, 3), IVec2::new(3, 2)), "no jumping off the edge");
         assert!(!map.can_step(IVec2::new(1, 2), mountain), "no diagonal shortcut");
+    }
+
+    #[test]
+    fn paths_avoid_water_and_use_stairs() {
+        // 6x6 grass; a water channel across x=3 except at y=0; a 2-tile plateau at (1,4),(2,4)
+        // with stairs below (1,3).
+        let mut map = TerrainMap::filled(6, 6, Terrain::Grass);
+        for y in 1..6 {
+            map.set(IVec2::new(3, y), Terrain::Water);
+        }
+        map.set(IVec2::new(1, 4), Terrain::Mountain);
+        map.set(IVec2::new(2, 4), Terrain::Mountain);
+        assert!(map.add_stairs(IVec2::new(1, 3)));
+
+        let path = map.find_path(IVec2::new(0, 5), IVec2::new(5, 5)).expect("around the channel");
+        assert!(path.iter().all(|t| map.get(*t) != Some(Terrain::Water)));
+        assert!(path.contains(&IVec2::new(3, 0)), "must cross at the gap");
+        assert_eq!(*path.last().unwrap(), IVec2::new(5, 5));
+
+        let up = map.find_path(IVec2::new(2, 2), IVec2::new(2, 4)).expect("up the stairs");
+        assert!(up.contains(&IVec2::new(1, 3)), "only way up is the staircase: {up:?}");
+        assert!(!up.contains(&IVec2::new(2, 3)) || up.iter().position(|t| *t == IVec2::new(2, 3)) < up.iter().position(|t| *t == IVec2::new(1, 3)));
+
+        // An island of water-locked grass is unreachable; so is a plateau without stairs.
+        let mut island = TerrainMap::filled(5, 5, Terrain::Water);
+        island.set(IVec2::new(0, 0), Terrain::Grass);
+        island.set(IVec2::new(4, 4), Terrain::Grass);
+        assert!(island.find_path(IVec2::new(0, 0), IVec2::new(4, 4)).is_none());
+        assert!(map.find_path(IVec2::new(0, 0), IVec2::new(3, 3)).is_none(), "water tile");
+        assert_eq!(map.find_path(IVec2::new(1, 1), IVec2::new(1, 1)), Some(vec![]));
     }
 
     #[test]

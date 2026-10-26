@@ -53,15 +53,25 @@ impl Faction {
         }
     }
 
-    /// Folder with this faction's unit sheets, relative to the asset root (agents.md §5).
-    #[allow(dead_code)]
+    /// Folder with this faction's building sprites, relative to `assets/` (agents.md §5).
+    pub fn building_dir(self) -> &'static str {
+        match self {
+            Faction::Reclaimers => "buildings/blue_buildings",
+            Faction::Red => "buildings/red_buildings",
+            Faction::Purple => "buildings/purple_buildings",
+            Faction::Yellow => "buildings/yellow_buildings",
+            Faction::Black => "buildings/black_buildings",
+        }
+    }
+
+    /// Folder with this faction's unit sheets, relative to `assets/` (agents.md §5).
     pub fn sprite_dir(self) -> &'static str {
         match self {
-            Faction::Reclaimers => "Units/Blue Units",
-            Faction::Red => "Units/Red Units",
-            Faction::Purple => "Units/Purple Units",
-            Faction::Yellow => "Units/Yellow Units",
-            Faction::Black => "Units/Black Units",
+            Faction::Reclaimers => "units/blue_units",
+            Faction::Red => "units/red_units",
+            Faction::Purple => "units/purple_units",
+            Faction::Yellow => "units/yellow_units",
+            Faction::Black => "units/black_units",
         }
     }
 }

@@ -79,9 +79,23 @@ impl Base {
 #[derive(Clone, Debug)]
 pub struct Tower {
     pub owner: Faction,
+    /// Set when the owner just changed; the overworld plays the capture effect, swaps the
+    /// sprite and clears it.
+    pub prev_owner: Option<Faction>,
     pub tile: IVec2,
     /// Units defending it: Black's own at first, later whatever an AI army left behind.
     pub garrison: Army,
+}
+
+impl Tower {
+    /// Hand the tower to `new_owner`, remembering who held it for the capture animation.
+    pub fn change_owner(&mut self, new_owner: Faction, garrison: Army) {
+        if self.owner != new_owner {
+            self.prev_owner = Some(self.prev_owner.unwrap_or(self.owner));
+        }
+        self.owner = new_owner;
+        self.garrison = garrison;
+    }
 }
 
 /// An idle unit standing in the wild that hires out its own kind.
@@ -141,7 +155,7 @@ impl WorldState {
         let towers: Vec<Tower> =
             pick_feature_tiles(&terrain, &bases, &features, &mut rng, TOWER_COUNT, false, &mut taken)
                 .into_iter()
-                .map(|tile| Tower { owner: Faction::Black, tile, garrison: armies::tower_garrison(&mut rng) })
+                .map(|tile| Tower { owner: Faction::Black, prev_owner: None, tile, garrison: armies::tower_garrison(&mut rng) })
                 .collect();
         let sellers: Vec<Seller> =
             pick_feature_tiles(&terrain, &bases, &features, &mut rng, UnitKind::ALL.len(), true, &mut taken)
@@ -234,8 +248,7 @@ impl WorldState {
             }
             EncounterSource::Tower(i) => {
                 let loser = self.towers[i].owner;
-                self.towers[i].owner = Faction::Reclaimers;
-                self.towers[i].garrison = Army::empty(Faction::Reclaimers);
+                self.towers[i].change_owner(Faction::Reclaimers, Army::empty(Faction::Reclaimers));
                 (loser, treasuries.take_half(loser))
             }
             EncounterSource::AiArmy(i) => {

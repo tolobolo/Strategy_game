@@ -16,10 +16,10 @@ pub use economy::Treasuries;
 pub use interact::Nearby;
 pub use world::{PendingEncounter, WorldState};
 
-use crate::assets::{Animated, GameAssets};
+use crate::assets::{Animated, Fx, GameAssets, TOWER_ANCHOR, TOWER_SCALE, UnitAnim, UnitArt, UnitVisual, spawn_effect};
 use crate::faction::Faction;
 use crate::states::GameState;
-use crate::units::{HERO_SLOTS, PlayerArmy, Team};
+use crate::units::{HERO_SLOTS, PlayerArmy, Team, UnitKind};
 use buildings::BuildingKind;
 use economy::{INCOME_INTERVAL_SECS, TOWER_INCOME};
 use interact::{Touch, Touchable};
@@ -28,6 +28,9 @@ use world::DecorationKind;
 
 const HERO_SPEED: f32 = 260.0;
 const HERO_SIZE: f32 = 40.0;
+/// Unit sprites on the map are drawn at this scale, feet at `UNIT_FEET` from the entity's centre.
+pub const OVERWORLD_UNIT_SCALE: f32 = 0.5;
+pub const UNIT_FEET: Vec2 = Vec2::new(0.0, -12.0);
 /// Sheet index (0-based) of the base-ground tiles: `tilemap_color5`.
 const BASE_GROUND_SHEET: usize = 4;
 
@@ -41,6 +44,10 @@ pub struct MoveSpeed(pub f32);
 /// the tile it stands on and only changes on a staircase.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layer(pub u8);
+
+/// The hero's animated sprite (a child of the `Hero` entity).
+#[derive(Component)]
+struct HeroSprite;
 
 #[derive(Component)]
 struct OverworldHud;
@@ -57,6 +64,17 @@ struct OwnerBorder;
 
 #[derive(Component)]
 struct BuildingLabel;
+
+/// The tower sprite: which owner's colour it shows and the pending colour swap.
+#[derive(Component)]
+struct TowerVisual {
+    index: usize,
+    shown: Faction,
+    swap: Option<Timer>,
+}
+
+/// Explosion + dust, then dust alone, then the tower changes colour.
+const TOWER_SWAP_SECS: f32 = 1.0;
 
 pub struct OverworldPlugin;
 
@@ -85,6 +103,7 @@ impl Plugin for OverworldPlugin {
                     armies::respawn_roamers,
                     armies::refresh_army_labels,
                     refresh_building_visuals,
+                    tower_capture_visuals,
                     interact::trigger_fights,
                     armies::roamer_encounters,
                     refresh_overworld_hud,
@@ -321,8 +340,44 @@ fn refresh_building_visuals(
     }
 }
 
+/// When a tower changes hands: explosion and dust together, then dust alone, then the sprite
+/// switches to the new owner's colour.
+fn tower_capture_visuals(
+    time: Res<Time>,
+    mut commands: Commands,
+    assets: Res<GameAssets>,
+    mut world: ResMut<WorldState>,
+    mut towers: Query<(&mut TowerVisual, &mut Sprite)>,
+) {
+    for (mut visual, mut sprite) in &mut towers {
+        let index = visual.index;
+        let (owner, prev_owner, tile) = {
+            let tower = &world.towers[index];
+            (tower.owner, tower.prev_owner, tower.tile)
+        };
+        if visual.swap.is_none() {
+            if prev_owner.is_some() && owner != visual.shown {
+                let pos = world.terrain.world_pos(tile);
+                spawn_effect(&mut commands, Fx::Explosion2, pos, 4.0, 0.9, 0.0, None);
+                spawn_effect(&mut commands, Fx::Dust2, pos, 4.1, 1.6, 0.0, None);
+                spawn_effect(&mut commands, Fx::Dust1, pos + Vec2::new(0.0, 10.0), 4.1, 1.8, 0.55, None);
+                visual.swap = Some(Timer::from_seconds(TOWER_SWAP_SECS, TimerMode::Once));
+            }
+            continue;
+        }
+        let finished = visual.swap.as_mut().is_some_and(|t| t.tick(time.delta()).just_finished());
+        if finished {
+            sprite.image = assets.towers[&owner].clone();
+            visual.shown = owner;
+            visual.swap = None;
+            world.towers[index].prev_owner = None;
+        }
+    }
+}
+
 fn spawn_overworld(
     mut commands: Commands,
+    mut art: UnitArt,
     world: Res<WorldState>,
     assets: Res<GameAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -345,14 +400,23 @@ fn spawn_overworld(
         }
     }
 
-    // Towers.
+    // Towers: the real sprite in the colour of whoever holds it (Black at first).
     for (ti, tower) in world.towers.iter().enumerate() {
-        commands.spawn(building_bundle(
-            BuildingKind::Tower.color(),
-            Vec2::splat(TILE - 10.0),
-            world.terrain.world_pos(tower.tile),
-            Touch::Tower(ti),
-            &world,
+        let shown = tower.prev_owner.unwrap_or(tower.owner);
+        let (_, text) = building_text(&world, Touch::Tower(ti));
+        commands.spawn((
+            Sprite::from_image(assets.towers[&shown].clone()),
+            TOWER_ANCHOR,
+            Transform::from_translation((world.terrain.world_pos(tower.tile) + Vec2::new(0.0, -20.0)).extend(1.0))
+                .with_scale(Vec3::splat(TOWER_SCALE)),
+            Touchable { touch: Touch::Tower(ti), radius: TILE * 0.5 + HERO_SIZE * 0.7 },
+            BuildingVisual(Touch::Tower(ti)),
+            TowerVisual { index: ti, shown, swap: None },
+            DespawnOnExit(GameState::Overworld),
+            children![(
+                BuildingLabel,
+                label(text, Color::WHITE, Vec2::new(0.0, 215.0)),
+            )],
         ));
     }
 
@@ -360,18 +424,12 @@ fn spawn_overworld(
     for (si, seller) in world.sellers.iter().enumerate() {
         let text = format!("Idle {}\nE: hire for {}g", seller.unit.name(), seller.unit.price());
         commands.spawn((
-            Sprite::from_color(Color::srgb(0.75, 0.75, 0.70), Vec2::splat(HERO_SIZE)),
             Transform::from_translation(world.terrain.world_pos(seller.tile).extend(1.0)),
+            Visibility::default(),
             Touchable { touch: Touch::Seller(si), radius: HERO_SIZE * 1.2 },
             DespawnOnExit(GameState::Overworld),
             children![
-                (
-                    Text2d::new(seller.unit.initial().to_string()),
-                    TextFont { font_size: FontSize::Px(24.0), ..default() },
-                    TextColor(Color::BLACK),
-                    Transform::from_xyz(0.0, 0.0, 0.1),
-                    Pickable::IGNORE,
-                ),
+                art.bundle(UnitVisual::new(Faction::Reclaimers, seller.unit, false), OVERWORLD_UNIT_SCALE, UNIT_FEET, 0.1),
                 label(text, Color::WHITE, Vec2::new(0.0, HERO_SIZE * 0.9)),
             ],
         ));
@@ -379,10 +437,10 @@ fn spawn_overworld(
 
     // Roaming armies and bandits.
     for (i, army) in world.armies.iter().enumerate().filter(|(_, a)| a.alive) {
-        armies::spawn_ai_army_entity(&mut commands, army, i);
+        armies::spawn_ai_army_entity(&mut commands, &mut art, army, i);
     }
     for (i, squad) in world.bandits.iter().enumerate().filter(|(_, b)| b.alive) {
-        armies::spawn_bandit_entity(&mut commands, &mut meshes, &mut materials, squad, i);
+        armies::spawn_bandit_entity(&mut commands, &mut art, &mut meshes, &mut materials, squad, i);
     }
 
     // Hero.
@@ -392,10 +450,16 @@ fn spawn_overworld(
         MoveSpeed(HERO_SPEED),
         Layer(hero_layer),
         Faction::Reclaimers,
-        Sprite::from_color(Faction::Reclaimers.color(), Vec2::splat(HERO_SIZE)),
         Transform::from_translation(world.hero_pos.extend(5.0)),
+        Visibility::default(),
         DespawnOnExit(GameState::Overworld),
-        children![label("HERO", Team::Player.color(), Vec2::new(0.0, HERO_SIZE * 0.85))],
+        children![
+            (
+                HeroSprite,
+                art.bundle(UnitVisual::new(Faction::Reclaimers, UnitKind::Warrior, false), OVERWORLD_UNIT_SCALE, UNIT_FEET, 0.1),
+            ),
+            label("HERO", Team::Player.color(), Vec2::new(0.0, HERO_SIZE * 0.85)),
+        ],
     ));
 
     // HUD.
@@ -445,6 +509,7 @@ fn hero_input(
     time: Res<Time>,
     world: Res<WorldState>,
     mut hero: Single<(&mut Transform, &MoveSpeed, &mut Layer), With<Hero>>,
+    mut sprite: Single<&mut UnitVisual, With<HeroSprite>>,
 ) {
     let mut dir = Vec2::ZERO;
     if keys.any_pressed([KeyCode::KeyW, KeyCode::ArrowUp]) {
@@ -478,6 +543,14 @@ fn hero_input(
         && layer.0 != now
     {
         layer.0 = now;
+    }
+
+    // Run while moving, face the way we go.
+    let anim = if dir == Vec2::ZERO { UnitAnim::Idle } else { UnitAnim::Run };
+    let flip = if dir.x != 0.0 { dir.x < 0.0 } else { sprite.flip_x };
+    if sprite.anim != anim || sprite.flip_x != flip {
+        sprite.play(anim, false);
+        sprite.flip_x = flip;
     }
 }
 
