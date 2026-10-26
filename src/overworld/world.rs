@@ -45,6 +45,9 @@ pub struct Base {
     pub home: Faction,
     /// Who holds it now.
     pub owner: Faction,
+    /// Set when the owner just changed; the overworld plays the capture effect on every
+    /// building of the base, swaps the sprites and clears it.
+    pub prev_owner: Option<Faction>,
     /// Bottom-left tile.
     pub origin: IVec2,
     /// Units stored in the castle (max `CASTLE_SLOTS`). This is also what defends the castle.
@@ -237,8 +240,10 @@ impl WorldState {
         match source {
             EncounterSource::Base(i) => {
                 let loser = self.bases[i].owner;
-                self.bases[i].owner = Faction::Reclaimers;
-                self.bases[i].garrison = Army::empty(Faction::Reclaimers);
+                let base = &mut self.bases[i];
+                base.prev_owner = Some(base.prev_owner.unwrap_or(loser));
+                base.owner = Faction::Reclaimers;
+                base.garrison = Army::empty(Faction::Reclaimers);
                 // A kingdom without a castle has nowhere to raise armies from.
                 for army in self.armies.iter_mut().filter(|a| a.faction == loser) {
                     army.alive = false;
@@ -302,7 +307,7 @@ fn place_bases(terrain: &mut TerrainMap, rng: &mut impl Rng) -> Vec<Base> {
                 rng.random_range(1..MAP_WIDTH - BASE_SIZE.x - 1),
                 rng.random_range(1..MAP_HEIGHT - BASE_SIZE.y - 1),
             );
-            let probe = Base { home: faction, owner: faction, origin: candidate, garrison: Army::empty(faction) };
+            let probe = Base { home: faction, owner: faction, prev_owner: None, origin: candidate, garrison: Army::empty(faction) };
             let flat = probe.tiles().all(|t| terrain.get(t) == Some(Terrain::Grass));
             let far = bases.iter().all(|b| chebyshev(b.centre(), probe.centre()) >= min_dist);
             if flat && far {
@@ -317,7 +322,7 @@ fn place_bases(terrain: &mut TerrainMap, rng: &mut impl Rng) -> Vec<Base> {
                 2 + (bases.len() as i32 / 2) * (MAP_HEIGHT - BASE_SIZE.y - 4),
             )
         });
-        let base = Base { home: faction, owner: faction, origin, garrison: starting_garrison(faction) };
+        let base = Base { home: faction, owner: faction, prev_owner: None, origin, garrison: starting_garrison(faction) };
         for tile in base.tiles() {
             terrain.set(tile, Terrain::Grass);
         }

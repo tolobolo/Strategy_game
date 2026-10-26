@@ -17,12 +17,20 @@ pub enum BuildingKind {
     Archery,
     Barracks,
     Monastery,
-    /// Towers are not part of a base; the variant is kept for its colour and name.
-    #[allow(dead_code)]
+    /// Towers are not part of a base, but share the sprite machinery.
     Tower,
 }
 
 impl BuildingKind {
+    pub const ALL: [BuildingKind; 6] = [
+        BuildingKind::Castle,
+        BuildingKind::House,
+        BuildingKind::Archery,
+        BuildingKind::Barracks,
+        BuildingKind::Monastery,
+        BuildingKind::Tower,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             BuildingKind::Castle => "Castle",
@@ -53,28 +61,15 @@ impl BuildingKind {
         }
     }
 
-    /// Placeholder fill colour.
-    pub fn color(self) -> Color {
-        match self {
-            BuildingKind::Castle => Color::srgb(0.62, 0.60, 0.58),
-            BuildingKind::House => Color::srgb(0.70, 0.50, 0.30),
-            BuildingKind::Archery => Color::srgb(0.45, 0.60, 0.35),
-            BuildingKind::Barracks => Color::srgb(0.55, 0.35, 0.30),
-            BuildingKind::Monastery => Color::srgb(0.80, 0.78, 0.65),
-            BuildingKind::Tower => Color::srgb(0.30, 0.30, 0.34),
-        }
-    }
-
-    /// Sprite under `Buildings/<Colour> Buildings/` (agents.md §5).
-    #[allow(dead_code)]
+    /// Sprite under `buildings/<colour>_buildings/` (agents.md §5).
     pub fn sprite_file(self) -> &'static str {
         match self {
-            BuildingKind::Castle => "Castle.png",
-            BuildingKind::House => "House1.png",
-            BuildingKind::Archery => "Archery.png",
-            BuildingKind::Barracks => "Barracks.png",
-            BuildingKind::Monastery => "Monastery.png",
-            BuildingKind::Tower => "Tower.png",
+            BuildingKind::Castle => "castle.png",
+            BuildingKind::House => "house1.png",
+            BuildingKind::Archery => "archery.png",
+            BuildingKind::Barracks => "barracks.png",
+            BuildingKind::Monastery => "monastery.png",
+            BuildingKind::Tower => "tower.png",
         }
     }
 }

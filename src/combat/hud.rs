@@ -284,7 +284,7 @@ pub fn refresh_panel(
     }
     lines.push(String::new());
     lines.push("Green border = YOUR stacks     Red border = ENEMY stacks".to_string());
-    lines.push("Click a lit tile: Move   Click an enemy: Strike (melee: touching, not diagonal; archers: 2-4 tiles away)".to_string());
+    lines.push("Click a lit tile: Move   Click an enemy: Strike (melee: any of the 8 tiles around you; archers: 2-4 tiles away)".to_string());
     lines.push("Click an own touching stack of the same kind: Merge   1: Unstack   3: Shield up   Space: End turn".to_string());
     panel.0 = lines.join("\n");
 

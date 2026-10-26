@@ -110,13 +110,14 @@ impl GridPos {
 }
 
 /// Can a stack with `range` standing on `from` strike something on `to`?
-/// Melee `(1, 1)` needs orthogonal adjacency; ranged kinds need the straight-line distance
+/// Melee `(1, 1)` reaches the 8 surrounding tiles; ranged kinds need the straight-line distance
 /// (`distance_to`) to lie within `min..=max`, so nothing closer than `min` can be hit.
 pub fn in_strike_range(range: (u32, u32), from: GridPos, to: GridPos) -> bool {
-    if range.1 <= 1 {
-        return from.is_adjacent(to);
-    }
     let d = from.distance_to(to);
+    if range.1 <= 1 {
+        // Melee reaches all 8 surrounding tiles, diagonals included.
+        return d == 1;
+    }
     d >= range.0 as i32 && d <= range.1 as i32
 }
 
@@ -176,7 +177,8 @@ mod tests {
         let melee = (1, 1);
         let bow = (2, 4);
         assert!(in_strike_range(melee, me, GridPos::new(6, 5)));
-        assert!(!in_strike_range(melee, me, GridPos::new(6, 6)), "melee cannot hit diagonally");
+        assert!(in_strike_range(melee, me, GridPos::new(6, 6)), "melee hits diagonally too");
+        assert!(!in_strike_range(melee, me, GridPos::new(7, 6)), "two tiles away is not melee");
         assert!(!in_strike_range(bow, me, GridPos::new(6, 5)), "archer: 1 tile is too close");
         assert!(!in_strike_range(bow, me, GridPos::new(6, 6)), "diagonal neighbour is still distance 1");
         assert!(in_strike_range(bow, me, GridPos::new(7, 5)));

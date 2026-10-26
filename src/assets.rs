@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
 use crate::faction::Faction;
+use crate::overworld::buildings::BuildingKind;
 use crate::units::UnitKind;
 
 /// Every tile sheet is 9 columns × 6 rows of 64×64 tiles.
@@ -42,13 +43,46 @@ pub struct GameAssets {
     pub duck: Strip,
     /// One-shot particle effects from `particle_fx/`, indexed by `Fx`.
     pub fx: HashMap<Fx, Strip>,
-    /// `buildings/<colour>_buildings/tower.png` per faction (128×256, base at row 230).
-    pub towers: HashMap<Faction, Handle<Image>>,
+    /// `buildings/<colour>_buildings/<kind>.png` per faction and kind.
+    pub buildings: HashMap<(Faction, BuildingKind), Handle<Image>>,
 }
 
-/// Scale and foot anchor of the tower sprite so it stands on its tile.
-pub const TOWER_SCALE: f32 = 0.55;
-pub const TOWER_ANCHOR: Anchor = Anchor(Vec2::new(0.0, -0.40));
+/// Scale that fits a building sprite onto its footprint (measured sizes in agents.md §5).
+pub fn building_scale(kind: BuildingKind) -> f32 {
+    match kind {
+        BuildingKind::Castle => 0.42,
+        BuildingKind::House => 0.6,
+        BuildingKind::Archery | BuildingKind::Barracks => 0.4,
+        BuildingKind::Monastery => 0.36,
+        BuildingKind::Tower => 0.55,
+    }
+}
+
+/// Anchor at the building's base (bottom of the visible pixels), so it stands on its tile.
+pub fn building_anchor(kind: BuildingKind) -> Anchor {
+    let (frame_h, base_row) = match kind {
+        BuildingKind::Castle => (256.0, 249.0),
+        BuildingKind::House => (192.0, 173.0),
+        BuildingKind::Archery => (256.0, 240.0),
+        BuildingKind::Barracks => (256.0, 245.0),
+        BuildingKind::Monastery => (320.0, 310.0),
+        BuildingKind::Tower => (256.0, 230.0),
+    };
+    Anchor(Vec2::new(0.0, 0.5 - base_row / frame_h))
+}
+
+/// Height of the drawn building in world units, for placing its label above it.
+pub fn building_height(kind: BuildingKind) -> f32 {
+    let visible = match kind {
+        BuildingKind::Castle => 208.0,
+        BuildingKind::House => 157.0,
+        BuildingKind::Archery => 179.0,
+        BuildingKind::Barracks => 187.0,
+        BuildingKind::Monastery => 265.0,
+        BuildingKind::Tower => 184.0,
+    };
+    visible * building_scale(kind)
+}
 
 /// The sprite-sheet particle effects in the pack. Play one with `spawn_effect`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -171,7 +205,10 @@ fn load_assets(server: &AssetServer, layouts: &mut Assets<TextureAtlasLayout>) -
         assets.fx.insert(fx, strip(server, layouts, file, UVec2::splat(frame), frames));
     }
     for faction in [Faction::Reclaimers, Faction::Red, Faction::Purple, Faction::Yellow, Faction::Black] {
-        assets.towers.insert(faction, server.load(format!("{}/tower.png", faction.building_dir())));
+        for kind in BuildingKind::ALL {
+            let path = format!("{}/{}", faction.building_dir(), kind.sprite_file());
+            assets.buildings.insert((faction, kind), server.load(path));
+        }
     }
     assets
 }
@@ -279,8 +316,51 @@ pub fn animate_sprites(time: Res<Time>, mut query: Query<(&mut Animated, &mut Sp
 pub enum UnitAnim {
     Idle,
     Run,
-    Attack,
+    /// Striking towards a direction (see `AttackDir::towards`).
+    Attack(AttackDir),
     Guard,
+}
+
+/// Vertical component of an attack. Sheets face right; the left side is the same sheet flipped.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum AttackDir {
+    Up,
+    UpRight,
+    Right,
+    DownRight,
+    Down,
+}
+
+impl AttackDir {
+    /// Direction and horizontal flip for an attacker at `from` hitting `to` (world coords, y up):
+    /// the signs of `to - from` pick the sheet, a negative x flips it.
+    pub fn towards(from: Vec2, to: Vec2) -> (AttackDir, Option<bool>) {
+        let d = to - from;
+        let dx = if d.x.abs() < 1.0 { 0 } else { d.x.signum() as i32 };
+        let dy = if d.y.abs() < 1.0 { 0 } else { d.y.signum() as i32 };
+        let dir = match (dx, dy) {
+            (0, 1) => AttackDir::Up,
+            (0, -1) => AttackDir::Down,
+            (_, 1) => AttackDir::UpRight,
+            (_, -1) => AttackDir::DownRight,
+            _ => AttackDir::Right,
+        };
+        // Straight up or down keeps whatever way the unit was facing.
+        let flip = (dx != 0).then_some(dx < 0);
+        (dir, flip)
+    }
+
+    /// Tilt (radians) for kinds that only have a right-facing attack sheet: the sprite is turned
+    /// towards the target instead. The Lancer has a sheet per direction and is never tilted.
+    pub fn tilt(self) -> f32 {
+        match self {
+            AttackDir::Up => std::f32::consts::FRAC_PI_2,
+            AttackDir::UpRight => std::f32::consts::FRAC_PI_4,
+            AttackDir::Right => 0.0,
+            AttackDir::DownRight => -std::f32::consts::FRAC_PI_4,
+            AttackDir::Down => -std::f32::consts::FRAC_PI_2,
+        }
+    }
 }
 
 impl UnitAnim {
@@ -288,7 +368,7 @@ impl UnitAnim {
         match self {
             UnitAnim::Idle => 8.0,
             UnitAnim::Run => 10.0,
-            UnitAnim::Attack => 10.0,
+            UnitAnim::Attack(_) => 10.0,
             UnitAnim::Guard => 8.0,
         }
     }
@@ -302,21 +382,25 @@ fn unit_sheet(kind: UnitKind, anim: UnitAnim) -> (&'static str, u32) {
     match (kind, anim) {
         (Warrior, Idle) => ("warrior/warrior_idle.png", 8),
         (Warrior, Run) => ("warrior/warrior_run.png", 6),
-        (Warrior, Attack) => ("warrior/warrior_attack1.png", 4),
+        (Warrior, Attack(_)) => ("warrior/warrior_attack1.png", 4),
         (Warrior, Guard) => ("warrior/warrior_guard.png", 6),
         (Archer, Idle | Guard) => ("archer/archer_idle.png", 6),
         (Archer, Run) => ("archer/archer_run.png", 4),
-        (Archer, Attack) => ("archer/archer_shoot.png", 8),
+        (Archer, Attack(_)) => ("archer/archer_shoot.png", 8),
         (Lancer, Idle) => ("lancer/lancer_idle.png", 12),
         (Lancer, Run) => ("lancer/lancer_run.png", 6),
-        (Lancer, Attack) => ("lancer/lancer_right_attack.png", 3),
+        (Lancer, Attack(AttackDir::Up)) => ("lancer/lancer_up_attack.png", 3),
+        (Lancer, Attack(AttackDir::UpRight)) => ("lancer/lancer_up_right_attack.png", 3),
+        (Lancer, Attack(AttackDir::Right)) => ("lancer/lancer_right_attack.png", 3),
+        (Lancer, Attack(AttackDir::DownRight)) => ("lancer/lancer_down_right_attack.png", 3),
+        (Lancer, Attack(AttackDir::Down)) => ("lancer/lancer_down_attack.png", 3),
         (Lancer, Guard) => ("lancer/lancer_right_defence.png", 6),
         (Monk, Idle | Guard) => ("monk/idle.png", 6),
         (Monk, Run) => ("monk/run.png", 4),
-        (Monk, Attack) => ("monk/heal.png", 11),
+        (Monk, Attack(_)) => ("monk/heal.png", 11),
         (Pawn, Idle | Guard) => ("pawn/pawn_idle.png", 8),
         (Pawn, Run) => ("pawn/pawn_run.png", 6),
-        (Pawn, Attack) => ("pawn/pawn_interact_knife.png", 4),
+        (Pawn, Attack(_)) => ("pawn/pawn_interact_knife.png", 4),
     }
 }
 
@@ -424,13 +508,22 @@ impl UnitArt<'_> {
 /// Swap the sheet whenever a `UnitVisual` changes.
 fn apply_unit_visuals(
     mut art: UnitArt,
-    mut query: Query<(&UnitVisual, &mut Sprite, &mut Animated), Changed<UnitVisual>>,
+    mut query: Query<(&UnitVisual, &mut Sprite, &mut Animated, &mut Transform), Changed<UnitVisual>>,
 ) {
-    for (visual, mut sprite, mut animated) in &mut query {
+    for (visual, mut sprite, mut animated, mut transform) in &mut query {
         let strip = art.strip(visual.faction, visual.kind, visual.anim);
         sprite.image = strip.image;
         sprite.texture_atlas = Some(TextureAtlas { layout: strip.layout, index: 0 });
         sprite.flip_x = visual.flip_x;
+        // Kinds without directional sheets lean towards their target while striking. A flipped
+        // sprite faces left, so its tilt runs the other way round.
+        let tilt = match visual.anim {
+            UnitAnim::Attack(dir) if visual.kind != UnitKind::Lancer => {
+                if visual.flip_x { -dir.tilt() } else { dir.tilt() }
+            }
+            _ => 0.0,
+        };
+        transform.rotation = Quat::from_rotation_z(tilt);
         *animated = if visual.once {
             Animated::once(strip.frames, visual.anim.fps())
         } else {
@@ -445,5 +538,22 @@ fn finish_one_shots(mut query: Query<(&mut UnitVisual, &Animated)>) {
         if visual.once && animated.finished {
             visual.play(UnitAnim::Idle, false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attack_direction_follows_the_sign_of_the_difference() {
+        let me = Vec2::new(100.0, 100.0);
+        assert_eq!(AttackDir::towards(me, Vec2::new(172.0, 100.0)), (AttackDir::Right, Some(false)));
+        assert_eq!(AttackDir::towards(me, Vec2::new(28.0, 100.0)), (AttackDir::Right, Some(true)), "left = flipped");
+        assert_eq!(AttackDir::towards(me, Vec2::new(172.0, 172.0)), (AttackDir::UpRight, Some(false)));
+        assert_eq!(AttackDir::towards(me, Vec2::new(28.0, 28.0)), (AttackDir::DownRight, Some(true)), "down-left = flipped down-right");
+        assert_eq!(AttackDir::towards(me, Vec2::new(100.0, 172.0)), (AttackDir::Up, None), "straight up keeps the facing");
+        assert_eq!(AttackDir::towards(me, Vec2::new(100.0, 28.0)), (AttackDir::Down, None));
+        assert!(AttackDir::UpRight.tilt() > 0.0 && AttackDir::DownRight.tilt() < 0.0 && AttackDir::Right.tilt() == 0.0);
     }
 }

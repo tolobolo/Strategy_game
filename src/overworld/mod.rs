@@ -7,6 +7,7 @@ pub mod armies;
 pub mod buildings;
 pub mod economy;
 pub mod interact;
+pub mod map;
 pub mod terrain;
 pub mod world;
 
@@ -16,7 +17,9 @@ pub use economy::Treasuries;
 pub use interact::Nearby;
 pub use world::{PendingEncounter, WorldState};
 
-use crate::assets::{Animated, Fx, GameAssets, TOWER_ANCHOR, TOWER_SCALE, UnitAnim, UnitArt, UnitVisual, spawn_effect};
+use crate::assets::{
+    Animated, Fx, GameAssets, UnitAnim, UnitArt, UnitVisual, building_anchor, building_height, building_scale, spawn_effect,
+};
 use crate::faction::Faction;
 use crate::states::GameState;
 use crate::units::{HERO_SLOTS, PlayerArmy, Team, UnitKind};
@@ -55,26 +58,23 @@ struct OverworldHud;
 #[derive(Component)]
 struct LandUnitedBanner;
 
-/// A building, tower or seller whose border colour and label follow `WorldState`.
+/// A building or tower whose label follows `WorldState`.
 #[derive(Component)]
 struct BuildingVisual(Touch);
 
 #[derive(Component)]
-struct OwnerBorder;
-
-#[derive(Component)]
 struct BuildingLabel;
 
-/// The tower sprite: which owner's colour it shows and the pending colour swap.
+/// A building sprite: its kind, which owner's colour it shows and the pending colour swap.
 #[derive(Component)]
-struct TowerVisual {
-    index: usize,
+struct BuildingSprite {
+    kind: BuildingKind,
     shown: Faction,
     swap: Option<Timer>,
 }
 
-/// Explosion + dust, then dust alone, then the tower changes colour.
-const TOWER_SWAP_SECS: f32 = 1.0;
+/// Explosion + dust, then dust alone, then the building changes colour.
+const CAPTURE_SWAP_SECS: f32 = 1.0;
 
 pub struct OverworldPlugin;
 
@@ -86,6 +86,7 @@ impl Plugin for OverworldPlugin {
         app.insert_resource(WorldState::generate(seed))
             .init_resource::<PlayerArmy>()
             .init_resource::<Nearby>()
+            .init_resource::<map::WorldMapOpen>()
             .add_plugins(economy::EconomyPlugin)
             .add_systems(OnEnter(GameState::Overworld), spawn_overworld)
             .add_systems(
@@ -103,9 +104,10 @@ impl Plugin for OverworldPlugin {
                     armies::respawn_roamers,
                     armies::refresh_army_labels,
                     refresh_building_visuals,
-                    tower_capture_visuals,
+                    capture_visuals,
                     interact::trigger_fights,
                     armies::roamer_encounters,
+                    map::toggle_world_map,
                     refresh_overworld_hud,
                 )
                     .chain()
@@ -267,24 +269,39 @@ fn spawn_decorations(commands: &mut Commands, assets: &GameAssets, world: &World
 
 // ---------- buildings ----------
 
-/// A coloured square with a thick border in the owner's colour and a label above it.
-fn building_bundle(fill: Color, size: Vec2, pos: Vec2, touch: Touch, world: &WorldState) -> impl Bundle {
-    let (owner, text) = building_text(world, touch);
+/// The pack's sprite for `kind` in `shown`'s colour, standing with its base at `feet`, with a
+/// label above it. `shown` is the previous owner while a capture animation is pending.
+fn building_bundle(
+    assets: &GameAssets,
+    kind: BuildingKind,
+    shown: Faction,
+    feet: Vec2,
+    footprint: Vec2,
+    touch: Touch,
+    world: &WorldState,
+) -> impl Bundle {
+    let (_, text) = building_text(world, touch);
     (
-        Sprite::from_color(fill, size),
-        Transform::from_translation(pos.extend(1.0)),
-        Touchable { touch, radius: size.max_element() / 2.0 + HERO_SIZE * 0.7 },
+        Sprite::from_image(assets.buildings[&(shown, kind)].clone()),
+        building_anchor(kind),
+        Transform::from_translation(feet.extend(1.0)).with_scale(Vec3::splat(building_scale(kind))),
+        Touchable { touch, radius: footprint.max_element() / 2.0 + HERO_SIZE * 0.7 },
         BuildingVisual(touch),
+        BuildingSprite { kind, shown, swap: None },
         DespawnOnExit(GameState::Overworld),
-        children![
+        children![(
+            BuildingLabel,
+            // The label is a child of a scaled parent, so undo the scale and place it over the roof.
             (
-                OwnerBorder,
-                Sprite::from_color(owner.color(), size + Vec2::splat(10.0)),
-                Transform::from_xyz(0.0, 0.0, -0.1),
+                Text2d::new(text),
+                TextFont { font_size: FontSize::Px(13.0), ..default() },
+                TextColor(Color::WHITE),
+                TextLayout::justify(Justify::Center),
+                Transform::from_xyz(0.0, (building_height(kind) + 14.0) / building_scale(kind), 0.2)
+                    .with_scale(Vec3::splat(1.0 / building_scale(kind))),
                 Pickable::IGNORE,
             ),
-            (BuildingLabel, label(text, Color::WHITE, Vec2::new(0.0, size.y / 2.0 + 16.0))),
-        ],
+        )],
     )
 }
 
@@ -297,7 +314,8 @@ fn building_text(world: &WorldState, touch: Touch) -> (Faction, String) {
         }
         Touch::Shop { base, kind } => {
             let owner = world.bases[base].owner;
-            (owner, format!("{} ({})\nsells {}", kind.name(), owner.name(), kind.sells().map_or("-", |u| u.name())))
+            // The owner is visible in the sprite's colour, so keep shop labels short.
+            (owner, format!("{}\nsells {}", kind.name(), kind.sells().map_or("-", |u| u.name())))
         }
         Touch::Tower(i) => {
             let tower = &world.towers[i];
@@ -311,25 +329,19 @@ fn building_text(world: &WorldState, touch: Touch) -> (Faction, String) {
     }
 }
 
-/// Owners change while you walk around (AI armies take towers, you move units), so the
-/// border colour and label of every building follow the world state.
+/// Owners and garrisons change while you walk around, so every building's label follows the
+/// world state (the sprite colour is handled by `capture_visuals`).
 fn refresh_building_visuals(
     world: Res<WorldState>,
     buildings: Query<(&BuildingVisual, &Children)>,
-    mut borders: Query<&mut Sprite, With<OwnerBorder>>,
-    mut labels: Query<&mut Text2d, (With<BuildingLabel>, Without<OwnerBorder>)>,
+    mut labels: Query<&mut Text2d, With<BuildingLabel>>,
 ) {
     if !world.is_changed() {
         return;
     }
     for (visual, children) in &buildings {
-        let (owner, text) = building_text(&world, visual.0);
+        let (_, text) = building_text(&world, visual.0);
         for child in children.iter() {
-            if let Ok(mut border) = borders.get_mut(child)
-                && border.color != owner.color()
-            {
-                border.color = owner.color();
-            }
             if let Ok(mut label) = labels.get_mut(child)
                 && label.0 != text
             {
@@ -340,37 +352,66 @@ fn refresh_building_visuals(
     }
 }
 
-/// When a tower changes hands: explosion and dust together, then dust alone, then the sprite
-/// switches to the new owner's colour.
-fn tower_capture_visuals(
+/// Owner and pending previous owner of the thing a `Touch` points at.
+fn owner_of(world: &WorldState, touch: Touch) -> (Faction, Option<Faction>) {
+    match touch {
+        Touch::Castle(i) | Touch::Shop { base: i, .. } => (world.bases[i].owner, world.bases[i].prev_owner),
+        Touch::Tower(i) => (world.towers[i].owner, world.towers[i].prev_owner),
+        Touch::Seller(_) => (Faction::Black, None),
+    }
+}
+
+/// When a tower or a base changes hands: explosion and dust together over every building, then
+/// dust alone, then the sprites switch to the new owner's colour.
+fn capture_visuals(
     time: Res<Time>,
     mut commands: Commands,
     assets: Res<GameAssets>,
     mut world: ResMut<WorldState>,
-    mut towers: Query<(&mut TowerVisual, &mut Sprite)>,
+    mut buildings: Query<(&BuildingVisual, &mut BuildingSprite, &mut Sprite, &Transform)>,
 ) {
-    for (mut visual, mut sprite) in &mut towers {
-        let index = visual.index;
-        let (owner, prev_owner, tile) = {
-            let tower = &world.towers[index];
-            (tower.owner, tower.prev_owner, tower.tile)
-        };
-        if visual.swap.is_none() {
-            if prev_owner.is_some() && owner != visual.shown {
-                let pos = world.terrain.world_pos(tile);
-                spawn_effect(&mut commands, Fx::Explosion2, pos, 4.0, 0.9, 0.0, None);
-                spawn_effect(&mut commands, Fx::Dust2, pos, 4.1, 1.6, 0.0, None);
-                spawn_effect(&mut commands, Fx::Dust1, pos + Vec2::new(0.0, 10.0), 4.1, 1.8, 0.55, None);
-                visual.swap = Some(Timer::from_seconds(TOWER_SWAP_SECS, TimerMode::Once));
+    for (visual, mut building, mut sprite, transform) in &mut buildings {
+        let (owner, prev_owner) = owner_of(&world, visual.0);
+        if building.swap.is_none() {
+            if prev_owner.is_some() && owner != building.shown {
+                let pos = transform.translation.truncate() + Vec2::new(0.0, building_height(building.kind) * 0.4);
+                let size = (building_height(building.kind) / 100.0).max(0.8);
+                spawn_effect(&mut commands, Fx::Explosion2, pos, 4.0, size, 0.0, None);
+                spawn_effect(&mut commands, Fx::Dust2, pos, 4.1, size * 1.8, 0.0, None);
+                spawn_effect(&mut commands, Fx::Dust1, pos + Vec2::new(0.0, 10.0), 4.1, size * 2.0, 0.55, None);
+                building.swap = Some(Timer::from_seconds(CAPTURE_SWAP_SECS, TimerMode::Once));
             }
             continue;
         }
-        let finished = visual.swap.as_mut().is_some_and(|t| t.tick(time.delta()).just_finished());
+        let finished = building.swap.as_mut().is_some_and(|t| t.tick(time.delta()).just_finished());
         if finished {
-            sprite.image = assets.towers[&owner].clone();
-            visual.shown = owner;
-            visual.swap = None;
-            world.towers[index].prev_owner = None;
+            sprite.image = assets.buildings[&(owner, building.kind)].clone();
+            building.shown = owner;
+            building.swap = None;
+        }
+    }
+
+    // Once every sprite of a base / tower shows its owner, forget the previous owner.
+    let pending: Vec<Touch> = buildings
+        .iter()
+        .filter(|(v, b, ..)| owner_of(&world, v.0).0 != b.shown)
+        .map(|(v, ..)| v.0)
+        .collect();
+    let still_pending = |touch: Touch| {
+        pending.iter().any(|p| match (p, touch) {
+            (Touch::Castle(a) | Touch::Shop { base: a, .. }, Touch::Castle(b) | Touch::Shop { base: b, .. }) => *a == b,
+            (Touch::Tower(a), Touch::Tower(b)) => *a == b,
+            _ => false,
+        })
+    };
+    for i in 0..world.bases.len() {
+        if world.bases[i].prev_owner.is_some() && !still_pending(Touch::Castle(i)) {
+            world.bases[i].prev_owner = None;
+        }
+    }
+    for i in 0..world.towers.len() {
+        if world.towers[i].prev_owner.is_some() && !still_pending(Touch::Tower(i)) {
+            world.towers[i].prev_owner = None;
         }
     }
 }
@@ -386,38 +427,27 @@ fn spawn_overworld(
     spawn_ground(&mut commands, &assets, &world);
     spawn_decorations(&mut commands, &assets, &world);
 
-    // Kingdom bases.
+    // Kingdom bases: every building is the pack's sprite in the holder's colour.
     for (bi, base) in world.bases.iter().enumerate() {
+        let shown = base.prev_owner.unwrap_or(base.owner);
         for (kind, tile) in base.buildings() {
             let size_tiles = kind.size().as_vec2();
-            let size = size_tiles * TILE - Vec2::splat(6.0);
-            let pos = world.terrain.world_pos(tile) + (size_tiles - Vec2::ONE) * TILE / 2.0;
+            let footprint = size_tiles * TILE;
+            let centre = world.terrain.world_pos(tile) + (size_tiles - Vec2::ONE) * TILE / 2.0;
+            let feet = centre + Vec2::new(0.0, -footprint.y / 2.0 + 8.0);
             let touch = match kind {
                 BuildingKind::Castle => Touch::Castle(bi),
                 _ => Touch::Shop { base: bi, kind },
             };
-            commands.spawn(building_bundle(kind.color(), size, pos, touch, &world));
+            commands.spawn(building_bundle(&assets, kind, shown, feet, footprint, touch, &world));
         }
     }
 
-    // Towers: the real sprite in the colour of whoever holds it (Black at first).
+    // Towers: Black at first, then whoever holds them.
     for (ti, tower) in world.towers.iter().enumerate() {
         let shown = tower.prev_owner.unwrap_or(tower.owner);
-        let (_, text) = building_text(&world, Touch::Tower(ti));
-        commands.spawn((
-            Sprite::from_image(assets.towers[&shown].clone()),
-            TOWER_ANCHOR,
-            Transform::from_translation((world.terrain.world_pos(tower.tile) + Vec2::new(0.0, -20.0)).extend(1.0))
-                .with_scale(Vec3::splat(TOWER_SCALE)),
-            Touchable { touch: Touch::Tower(ti), radius: TILE * 0.5 + HERO_SIZE * 0.7 },
-            BuildingVisual(Touch::Tower(ti)),
-            TowerVisual { index: ti, shown, swap: None },
-            DespawnOnExit(GameState::Overworld),
-            children![(
-                BuildingLabel,
-                label(text, Color::WHITE, Vec2::new(0.0, 215.0)),
-            )],
-        ));
+        let feet = world.terrain.world_pos(tower.tile) + Vec2::new(0.0, -20.0);
+        commands.spawn(building_bundle(&assets, BuildingKind::Tower, shown, feet, Vec2::splat(TILE), Touch::Tower(ti), &world));
     }
 
     // Idle sellers.
@@ -614,7 +644,7 @@ fn refresh_overworld_hud(
             let unit = world.sellers[i].unit;
             format!("Idle {}: E = hire for {}g", unit.name(), unit.price())
         }
-        None => "WASD: move.  Walk into buildings, towers and armies to use or attack them.  Red circles: bandits.  Stairs lead up to the high ground.".to_string(),
+        None => "WASD: move.  M: world map.  Walk into buildings, towers and armies to use or attack them.  Red circles: bandits.  Stairs lead up to the high ground.".to_string(),
     };
 
     let mut text = format!("{status}\n{prompt}");

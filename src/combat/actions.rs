@@ -10,7 +10,7 @@ use super::grid::{BattleGrid, GridPos, in_strike_range};
 use super::hud::CombatLog;
 use super::spawn::spawn_stack;
 use super::turn::{self, ActionPoints, ActiveStack, TurnOrder};
-use crate::assets::{Fx, UnitAnim, UnitArt, UnitVisual, anim_duration, spawn_effect};
+use crate::assets::{AttackDir, Fx, UnitAnim, UnitArt, UnitVisual, anim_duration, spawn_effect};
 use crate::faction::Faction;
 use crate::units::rules::{apply_damage, merge, split, stack_damage};
 use crate::states::GameState;
@@ -41,7 +41,7 @@ pub fn move_duration(steps: i32) -> f32 {
 
 /// The attack animation, or the arrow's flight if that is longer, capped.
 pub fn strike_duration(kind: crate::units::UnitKind, ranged_distance: Option<i32>) -> f32 {
-    let animation = anim_duration(kind, UnitAnim::Attack);
+    let animation = anim_duration(kind, UnitAnim::Attack(AttackDir::Right));
     let flight = ranged_distance.map_or(0.0, |d| d as f32 * ARROW_SECS_PER_TILE);
     animation.max(flight).max(MIN_STRIKE_SECS).min(MAX_ACTION_SECS)
 }
@@ -219,9 +219,24 @@ fn play(
     anim: UnitAnim,
     once: bool,
 ) {
+    face_and_play(children, visuals, stack, anim, once, None);
+}
+
+/// Like `play`, optionally turning the sprite (`flip_x`) first.
+fn face_and_play(
+    children: &Query<&Children>,
+    visuals: &mut Query<&mut UnitVisual>,
+    stack: Entity,
+    anim: UnitAnim,
+    once: bool,
+    flip_x: Option<bool>,
+) {
     let Ok(children) = children.get(stack) else { return };
     for child in children.iter() {
         if let Ok(mut visual) = visuals.get_mut(child) {
+            if let Some(flip) = flip_x {
+                visual.flip_x = flip;
+            }
             visual.play(anim, once);
         }
     }
@@ -315,8 +330,8 @@ pub fn resolve_actions(
                 let distance = my_pos.distance_to(other.pos);
                 let reason = if other.team == my_team {
                     Some("that is your own stack (click it to merge)".to_string())
-                } else if !my_stack.is_ranged() && !my_pos.is_adjacent(other.pos) {
-                    Some("target is not adjacent (diagonals do not count)".to_string())
+                } else if !my_stack.is_ranged() && distance != 1 {
+                    Some("target is not next to you (the 8 surrounding tiles)".to_string())
                 } else if my_stack.is_ranged() && distance < min_range as i32 {
                     Some(format!("too close: range is {min_range}-{max_range} tiles"))
                 } else if my_stack.is_ranged() && distance > max_range as i32 {
@@ -345,7 +360,9 @@ pub fn resolve_actions(
                 ap.0 -= 1;
                 acted = true;
                 delay = strike_duration(my_stack.kind, my_stack.is_ranged().then_some(distance));
-                play(&children, &mut visuals, me, UnitAnim::Attack, true);
+                // The attack sheet follows the direction attacker -> target.
+                let (dir, flip) = AttackDir::towards(my_transform.translation.truncate(), grid.to_world(other.pos));
+                face_and_play(&children, &mut visuals, me, UnitAnim::Attack(dir), true, flip);
                 if my_stack.is_ranged() {
                     let from = my_transform.translation.truncate();
                     let to = grid.to_world(other.pos);

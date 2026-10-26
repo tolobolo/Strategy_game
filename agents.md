@@ -37,6 +37,11 @@ The hero walks in real time (WASD / arrows) over a generated map (see 1.6). On i
 
 Water blocks the hero. Mountains are plateaus one layer up, reachable only by their staircase (1.6).
 
+**World map**: `M` opens a full-screen map (and closes it). It shows terrain, stairs, every base in
+its owner's colour with the castle marked, towers in their holder's colour, idle sellers and the
+hero. **Roaming armies and bandits are not shown**, so scouting still means walking there. The map is
+rendered from `WorldState` when opened (`overworld/map.rs`).
+
 ### 1.2 Kingdom bases
 
 Each of the four kingdoms (Blue = you, Red, Purple, Yellow) owns one base, **5×4 tiles**:
@@ -110,10 +115,10 @@ stairs) is skipped and stays as it is. After a capture an army with **fewer than
 back to its castle ("returning home"), rests 60 s ("resting... Ns") and sets out again with a fresh
 army; the garrison is untouched.
 
-**Tower sprites** use `buildings/<colour>_buildings/tower.png` in the holder's colour: Black at the
-start, then whoever takes it. A change of owner plays explosion + dust, then dust alone, then the
-tower switches colour (`tower_capture_visuals` in `overworld/mod.rs`, about 1 s). This also plays when
-you come back from winning a tower fight.
+**Building sprites**: towers and every base building use `buildings/<colour>_buildings/<kind>.png`
+in the holder's colour (towers start Black). A change of owner plays explosion + dust, then dust
+alone, over each building, then the sprites switch colour (`capture_visuals` in `overworld/mod.rs`,
+about 1 s). This also plays when you come back from winning a tower or castle fight.
 
 ### 1.6 World generation, layers and tiles
 
@@ -180,19 +185,20 @@ A **stack** is a group of units of the **same kind** standing on one tile. Every
 | `defence` | Damage each unit absorbs before losing health |
 | `speed` | Movement range in tiles |
 | `damage` | A `min..=max` range, rolled by every other unit in the stack (see 3.2) |
-| `range` | Strike range in tiles as `min..=max`, like damage. `1..=1` = melee (adjacent only). Archers have `2..=4`: they cannot hit anything closer than 2 tiles |
+| `range` | Strike range in tiles as `min..=max`, like damage. `1..=1` = melee: the 8 surrounding tiles. Archers have `2..=4`: they cannot hit anything closer than 2 tiles |
 | actions | The actions the kind can perform (see 3.3) |
 
 Unit kinds available in the pack: **Warrior, Archer, Lancer, Monk, Pawn**.
 
 ### 3.2 Damage
 
-**Adjacent** means orthogonally touching (up, down, left, right). Diagonal tiles are **not** adjacent.
+**Distance** between tiles is the larger of the horizontal and vertical difference, so all 8
+surrounding tiles are at distance 1. (Merging still needs the two stacks to touch orthogonally.)
 
 **Who can strike whom**
-- Melee kinds (range 1) strike an adjacent enemy stack.
+- Melee kinds (range 1) strike any enemy stack on one of the 8 surrounding tiles, diagonals included.
 - Ranged kinds (Archer) strike an enemy stack whose straight-line distance (the larger of dx, dy) lies
-  within `range`, so an archer with `2..=4` cannot hit a neighbour, diagonal or not, and cannot reach
+  within `range`, so an archer with `2..=4` cannot hit any of its 8 neighbours and cannot reach
   past 4 tiles. Enemies standing next to an archer do not stop it from shooting others.
 
 **Flanking**: if one of the attacker's stacks stands on the far side of the target (the tile straight
@@ -225,9 +231,9 @@ Every stack gets **3 action points (AP)** per turn and can mix actions freely.
 | Action | Cost | Effect |
 |---|---|---|
 | **Move** | 1 AP | Move up to `speed` steps. A straight step costs 1; diagonal steps alternate 1, 2, 1, 2 (Pathfinder rule), so two diagonals cost 3 |
-| **Strike** | 1 AP | Attack an enemy stack using the rules in 3.2 (melee: adjacent; ranged: distance within its `min..=max` range) |
+| **Strike** | 1 AP | Attack an enemy stack using the rules in 3.2 (melee: one of the 8 surrounding tiles; ranged: distance within its `min..=max` range). The attack animation is chosen from the direction attacker → target: the signs of the difference pick the Lancer's up / up-right / right / down-right / down sheet, a negative horizontal difference flips the sprite. Kinds with only one attack sheet are tilted towards the target instead (45° for diagonals, 90° straight up or down) |
 | **Unstack** | 1 AP | Split into two equal halves (odd count: the extra unit stays). The new half goes to the first free tile starting to the right and going clockwise. The original keeps the wounded lead unit and the remaining AP; the new half is inserted in the turn order **right before** the original, so from the next round it acts first |
-| **Merge** | 1 AP | Merge with an adjacent friendly stack of the **same kind**. The counts are added into the active stack, the other stack disappears from the grid and the turn order. Its wounded lead unit is healed (a stack only tracks one wounded unit) |
+| **Merge** | 1 AP | Merge with an orthogonally adjacent friendly stack of the **same kind**. The counts are added into the active stack, the other stack disappears from the grid and the turn order. Its wounded lead unit is healed (a stack only tracks one wounded unit) |
 | **Shield up** | 1 AP | +3 defence until this stack's next turn starts |
 
 Only stacks of the same unit kind can be merged. A stack that has nothing to split (1 unit) or no free
@@ -272,6 +278,7 @@ cleans them up automatically.
 | `src/overworld/economy.rs` | `EconomyPlugin` | `Treasuries` (gold per faction), income timer |
 | `src/overworld/interact.rs` | – | `Touch`/`Touchable`, `Nearby`, castle transfer, buying, fight triggers |
 | `src/overworld/armies.rs` | – | `AiArmy` and `BanditSquad` state, movement, tower grabbing, respawns, encounters |
+| `src/overworld/map.rs` | – | The `M` world map overlay, rendered as one pixel per tile from `WorldState` |
 | `src/combat/mod.rs` | `CombatPlugin` | Wires the combat sub-modules |
 | `src/combat/grid.rs` | – | `BattleGrid`, `GridPos`, `Tile` |
 | `src/combat/spawn.rs` | – | Builds the grid, places both armies, rolls turn order |
@@ -287,7 +294,7 @@ cleans them up automatically.
 | `Hero`, `MoveSpeed` | overworld hero | The player avatar |
 | `Touchable { touch, radius }` | buildings, towers, sellers | What touching it means (`Touch::Castle/Shop/Tower/Seller`) |
 | `AiArmyMarker(i)`, `BanditMarker(i)` | roaming armies | Index into `WorldState.armies` / `.bandits`; transforms are synced from there |
-| `TowerVisual { index, shown, swap }` | towers | Which owner colour the tower sprite shows and the pending swap after a capture |
+| `BuildingSprite { kind, shown, swap }` | buildings, towers | Which owner colour the sprite shows and the pending swap after a capture |
 | `ArmyLabel` | roamer children | Floating text kept in sync with the army |
 | `Faction` | hero, roamers, stacks | Which side owns it; drives fill colour and sprite folder |
 | `Team` | stacks | `Player` or `Enemy`. Drives the green/red "yours vs theirs" border |
@@ -313,6 +320,7 @@ cleans them up automatically.
 | `IncomeTimer` | always | 30 s tick for castle and tower income |
 | `PlayerArmy` | always | The stacks the hero carries (max 20 slots). Starts empty |
 | `Nearby` | always | What the hero is touching + a short HUD message |
+| `WorldMapOpen` | always | Whether the `M` map overlay is showing |
 | `PendingEncounter { enemy, source }` | Overworld → Combat | The enemy army and what it defends (`EncounterSource::Base/Tower/AiArmy/Bandits`) |
 | `BattleGrid` | Combat | Grid size and tile size |
 | `TurnOrder` | Combat | Shuffled list of stack entities + current index |
@@ -398,7 +406,7 @@ lasts); the overworld uses Idle and Run.
 | Archer | Arrow | `archer/arrow.png` | 1 (64×64) | projectile flying to the target on Strike |
 | Lancer | Idle | `lancer/lancer_idle.png` | 12 | standing |
 | Lancer | Run | `lancer/lancer_run.png` | 6 | Move |
-| Lancer | Attack | `lancer/lancer_right_attack.png` | 3 | Strike (also `_up_`, `_down_`, `_up_right_`, `_down_right_` variants, 3 frames each) |
+| Lancer | Attack | `lancer/lancer_<up, up_right, right, down_right, down>_attack.png` | 3 each | Strike, picked by the direction to the target (`AttackDir::towards`); left side = flipped |
 | Lancer | Defence | `lancer/lancer_right_defence.png` | 6 | Shield up (same directional variants) |
 | Monk | Idle | `monk/idle.png` | 6 | standing, Shield up |
 | Monk | Run | `monk/run.png` | 4 | Move |
@@ -429,8 +437,16 @@ Aseprite sources (Blue only) are in `units/units_aseprite_in_blue_only/`.
 
 ### Buildings – `buildings/<colour>_buildings/…`
 
-Castle 320×256, Barracks 192×256, Tower 128×256 (base at row 230, wired in), Archery, Monastery,
-House1–3. The base buildings are still coloured squares.
+All wired in (`building_scale` / `building_anchor` in `src/assets.rs`), one file per kingdom colour:
+
+| Building | File | Size | Base row |
+|---|---|---|---|
+| Castle | `castle.png` | 320×256 | 249 |
+| House | `house1.png` (`house2`, `house3` unused) | 128×192 | 173 |
+| Archery | `archery.png` | 192×256 | 240 |
+| Barracks | `barracks.png` | 192×256 | 245 |
+| Monastery | `monastery.png` | 192×320 | 310 |
+| Tower | `tower.png` | 128×256 | 230 |
 
 ### UI – `ui_elements/ui_elements/…`
 
@@ -467,5 +483,5 @@ system; the pack's effects are frame strips, so none is needed).
 - [x] Terrain tiles, cliffs, stairs and decorations from the sprite map
 - [x] Unit sprites with idle / run / attack / guard
 - [x] Arrows and death dust
-- [x] Tower sprites and capture animation
-- [ ] Base building and UI sprites; water foam; hit and heal effects
+- [x] Tower and base building sprites with the capture animation
+- [ ] UI sprites; water foam; hit and heal effects
