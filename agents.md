@@ -28,8 +28,8 @@ The hero walks in real time (WASD / arrows) over a generated map (see 1.6). On i
 | Thing | Touching it does |
 |---|---|
 | **Your castle** | Opens the garrison: move units between the castle and the hero (1.4) |
-| **Your shop buildings** (House, Archery, Barracks, Monastery) | `E` hires one unit of that building's kind (1.2) |
-| **Idle sellers** | A lone unit standing in the wild. `E` hires one of its kind for the same price |
+| **Your shop buildings** (House, Archery, Barracks, Monastery) | `R` hires one unit of that building's kind (1.2); `Tab` opens the shop |
+| **Idle sellers** | A lone unit standing in the wild. `R` hires one of its kind for the same price; `Tab` opens the shop |
 | **Enemy castle** | Starts a fight against its garrison. Win = the whole base is yours (1.5) |
 | **Tower** you do not own | Starts a fight against the units guarding it. Win = the tower pays you (1.3) |
 | **AI army** | Starts a fight against that army |
@@ -280,6 +280,10 @@ cleans them up automatically.
 | `src/overworld/interact.rs` | – | `Touch`/`Touchable`, `Nearby`, castle transfer, buying, fight triggers |
 | `src/overworld/armies.rs` | – | `AiArmy` and `BanditSquad` state, movement, tower grabbing, respawns, encounters |
 | `src/overworld/map.rs` | – | The `M` world map overlay, rendered as one pixel per tile from `WorldState` |
+| `src/overworld/shop.rs` | – | The `Tab` shop panel (§6.1): wood table, avatar, animated preview, stats paper, buy button |
+| `src/ui.rs` | – | Shared UI pieces (§6.2): nine-slice panels, coin / sword stats, ribbons, finish banner |
+| `src/overworld/castle_panel.rs` | – | The `Tab` castle panel (§6.3): avatar ribbon, garrison / hero counts, TAKE / STORE |
+| `src/overworld/army_panel.rs` | – | The `E` army page (§6.4): troop list with avatars, preview and stats |
 | `src/combat/mod.rs` | `CombatPlugin` | Wires the combat sub-modules |
 | `src/combat/grid.rs` | – | `BattleGrid`, `GridPos`, `Tile` |
 | `src/combat/spawn.rs` | – | Builds the grid, places both armies, rolls turn order |
@@ -322,6 +326,9 @@ cleans them up automatically.
 | `PlayerArmy` | always | The stacks the hero carries (max 20 slots). Starts empty |
 | `Nearby` | always | What the hero is touching + a short HUD message |
 | `WorldMapOpen` | always | Whether the `M` map overlay is showing |
+| `OpenShop` | always | The shop panel's target while it is open |
+| `OpenCastle` | always | The castle panel's base and selected unit kind while it is open |
+| `OpenArmy`, `ArmyPanelShown` | always | The army page's selected kind, and what it was last built from |
 | `PendingEncounter { enemy, source }` | Overworld → Combat | The enemy army and what it defends (`EncounterSource::Base/Tower/AiArmy/Bandits`) |
 | `BattleGrid` | Combat | Grid size and tile size |
 | `TurnOrder` | Combat | Shuffled list of stack entities + current index |
@@ -340,6 +347,7 @@ in `combat/actions.rs`). That keeps the rules in one place.
 
 Controls: click a lit tile = Move, click an enemy stack = Strike, click an own stack = Merge,
 `1` = Unstack, `3` = Shield up, `Space` = End turn. There is no way to leave a battle early.
+Overworld keys: `Tab` shop / castle panel, `E` army page, `R` quick buy, `M` map, `1`–`5` castle transfer.
 
 ### 4.6 Schedule
 
@@ -367,6 +375,7 @@ OnEnter(CombatPhase::Finished) show_result ; Update: wait_for_continue -> Overwo
 - **a new kingdom** → `Faction` variant + colour + sprite folder in `faction.rs`, and add it to `Faction::KINGDOMS`.
 - **a new building** → `BuildingKind` in `overworld/buildings.rs` (what it sells, size) and a slot in `base_layout()`.
 - **a new thing to touch** → `Touch` variant in `overworld/interact.rs`, spawn it with a `Touchable`, handle it in the systems there and in the HUD prompt.
+- **a new UI panel** → copy the shape of `overworld/shop.rs`: a resource that says whether it is open, a spawn function built from `children![..]`, marker components on the buttons and a `wire_*_buttons` system that attaches picking observers to them.
 - **a new roamer behaviour** → `overworld/armies.rs` (`ai_armies_act` state machine, `bandits_wander`, `follow_path`).
 - **movement rules** → `TerrainMap::can_step` in `overworld/terrain.rs`; the hero and `find_path` (used by all roamers) both go through it.
 - **anything clickable in combat** → give the sprite `Pickable::default()`. Bevy 0.19 only hit-tests sprites that carry that component; labels and decorations get `Pickable::IGNORE`.
@@ -426,6 +435,7 @@ Aseprite sources (Blue only) are in `units/units_aseprite_in_blue_only/`.
 | Ground tilemap | `tileset/tilemap_color1..5.png` (576×384) | 64×64, 9 columns × 6 rows (see §1.6 for the cell map) |
 | Water foam | `tileset/water_foam.png` (3072×192) | 192×192, 16 frames |
 | Water background | `tileset/water_background_color.png` | 64×64 |
+| Screen background | `background.png` (user-made, 2496×800) | sea and clouds behind everything in both states: a child sprite of the camera at z −999, scaled each frame to cover the window (`fit_background` in `main.rs`) |
 | Shadow | `tileset/shadow.png` | 192×192 |
 | Trees | `resources/wood/trees/tree1..4.png` | 192×256 (1, 2) or 192×192 (3, 4), 8 frames; stumps separate |
 | Gold stones | `resources/gold/gold_stones/gold_stone_N.png` | 128×128 (+ `_highlight`) |
@@ -469,7 +479,124 @@ system; the pack's effects are frame strips, so none is needed).
 
 ---
 
-## 6. Roadmap
+## 6. UI
+
+### 6.1 Shop panel
+
+Opened with **Tab** while standing next to one of your shop buildings (House, Archery, Barracks,
+Monastery) or an idle seller. **R** hires one unit directly without opening it (quick buy). Closed
+with Tab, Esc, the red X, or by walking away. The world keeps running while it is open.
+
+```
++-----------------------------------------------------------------------------------+
+|  TOP-DOWN GAME WORLD                                                              |
+|                                                                                   |
+|                                     (Mouse Click)                                 |
+|                                          │                                        |
+|                                          ▼                                        |
+|                                  [Unit / Building]                                |
+|                                          │                                        |
+|  ========================================│======================================  |
+|  FULLSCREEN UI OVERLAY (Shop Screen)     │ (Raycast Hit triggers UI)              |
+|                                          ▼                                        |
+|  +-----------------------------------------------------------------------------+  |
+|  | SHOP INSPECTION PANEL / texture: avator of the unit                 icon_9  |  |
+|  |                                                                             |  |
+|  |  +-----------------------------+    +------------------------------------+  |  |
+|  |  | 2D PREVIEW / RENDER TEXTURE |    | STATS OVERLAY                      |  |  |
+|  |  |                             |    | Name: Heavy Archer                 |  |  |
+|  |  |        (o/  <- Unit         |    | ATK : 85                           |  |  |
+|  |  |       /|    Attacking       |    | DEF : 40                           |  |  |
+|  |  |       / \   Animation       |    | SPD : 12                           |  |  |
+|  |  +-----------------------------+    +------------------------------------+  |  |
+|  |                                                                             |  |
+|  |                                             +----------------------------+  |  |
+|  |                                             | [ BUY UNIT - $150 ]        |  |  |
+|  |                                             +----------------------------+  |  |
+|  +-----------------------------------------------------------------------------+  |
+|                                                                                   |
++-----------------------------------------------------------------------------------+
+```
+
+| Part | Asset | Notes |
+|---|---|---|
+| Panel | `wood_table.png` | nine-slice; the metal corners come from the sheet's corner tiles |
+| Avatar | `human_avatars/avatars_NN.png` | five faces per colour (blue 01–05, red 06–10, yellow 11–15, purple 16–20, black 21–25) in the order Warrior, Lancer, Archer, Monk, Pawn; the shop owner's colour, Blue for idle sellers (`avatar_index` in `src/ui.rs`) |
+| 2D preview | the unit's Attack strip (`units/<colour>_units/…`) | looping, no background |
+| Stats | `papers/regular_paper.png` | nine-slice; name, HP, DEF, ATK range, SPD, RANGE, price, slot cost |
+| Buy button | `buttons/big_red_button_regular.png` / `_pressed.png` | nine-slice; the big button because "BUY - 10g" needs the width. Buys one unit per click through the same `try_buy` as `E` |
+| Close | `icons/icon_09.png` | the red X |
+| Status line | – | gold, army slots and the last message (full army, not enough gold, hired) |
+
+The pack's panels and buttons are sheets of nine separate tiles with gaps, which Bevy's
+`NodeImageMode::Sliced` cannot read directly. The tiles were stitched into contiguous nine-slice
+images in `assets/ui_elements/generated/*_9.png`; the border sizes measured while stitching are the
+`sliced(..)` values in `overworld/shop.rs`:
+
+| Generated file | Size | Borders left / right / top / bottom |
+|---|---|---|
+| `wood_table_9.png` | 232×252 | 84 / 84 / 85 / 103 |
+| `regular_paper_9.png` | 168×153 | 52 / 52 / 44 / 45 |
+| `big_red_button_regular_9.png` | 154×158 | 45 / 45 / 47 / 47 |
+| `big_red_button_pressed_9.png` | 164×149 | 50 / 50 / 36 / 49 |
+
+`ImageNode` draws in its **content box** by default (`VisualBox::ContentBox`), which leaves the
+node's padding bare; the panels use `VisualBox::BorderBox` (`panel()` in `overworld/shop.rs`) so the
+wood and paper cover the whole node including the padding.
+
+### 6.3 Castle panel (`overworld/castle_panel.rs`)
+
+`Tab` next to your own castle. Same wood table; under the title a **small blue ribbon**
+(`ribbons/small_ribbons.png`, the forked-end row of each colour stitched into
+`generated/ribbon_small_<colour>_3.png`, 188×60, caps 62 px) carries the **five avatars** in the
+same order as the number keys: Warrior, Archer, Lancer, Monk, Pawn. The **selected kind shows its blue avatar, the others their
+black one** (blue `avatars_01` ↔ black `avatars_21`, i.e. +20). Click an avatar or press 1–5 to
+select. Below: the idle animation of the selected kind, a paper with how many are in the castle and
+with you plus the stats, the sword army count, and **TAKE / STORE** buttons that move one unit (hold
+Ctrl: all) through the same `transfer` function as the number keys. The number keys keep working
+with the panel open.
+
+### 6.4 Army page (`overworld/army_panel.rs`)
+
+`E` anywhere on the overworld (E again, Esc or the X closes it). A wood table with **your troops
+listed downwards**, one row per kind you carry with its count: black avatars, the **selected row in
+blue**, like the castle ribbon but vertical. Click a row to select. The selected kind idles **top
+right** with its stats on a paper **under** it. The page is rebuilt whenever the selection or the
+army changes, so a unit bought or lost shows at once. With no troops it says where to get some.
+
+### 6.5 Combat HUD (`combat/hud.rs`)
+
+- **Turn queue** (top, on a wood bar): one avatar per stack in its side's colour (yours blue, the
+  enemy's in its kingdom colour) with the count under it. The queue is **rotated so whoever acts is at
+  the far left**, bigger and on a small ribbon in its team colour (blue / red); when it is done it
+  drops to the far right and the rest shift left.
+- **Info panel** (bottom left, wood table): the acting stack's avatar, a **small ribbon reading
+  "<Kind>'s turn"** whose colour says whose turn it is (blue = yours, the enemy's kingdom colour =
+  theirs) and the AP; the stack's stats on paper; the hovered stack; and the red buttons
+  **UNSTACK 1 / SHIELD 3 / END TURN**, which do exactly what the keys do and only on your turn.
+- **Log** (bottom right) on paper.
+
+### 6.2 Shared pieces (`src/ui.rs`)
+
+- **Gold is never written as a word**: wherever your gold total shows (overworld HUD, shop status
+  line) it is `icons/icon_03.png` (the coin) followed by the number (`gold_stat`).
+- **Army the same**: `icons/icon_05.png` (the sword) followed by `used/max` (`army_stat`).
+- **Finish texts use the big ribbons**: VICTORY (blue ribbon) and DEFEAT (red) as a title ribbon
+  with the details on a dark card beneath (`finish_banner`); the last win, YOU UNITED THE LAND, sits
+  entirely on one blue ribbon drawn at 2.2× (`big_ribbon`, scaled with `UiTransform`). `ribbons/big_ribbons.png` is
+  five colours × three pieces; each row was stitched into `generated/ribbon_<colour>_3.png`
+  (259×103, caps 98 / 97 px) and drawn as a three-slice with a stretched middle.
+- `panel`, `sliced`, `icon` are the building blocks every panel uses.
+
+Buttons are plain UI nodes with picking observers (`On<Pointer<Press / Release / Click>>`), attached
+by `wire_shop_buttons` after the panel is spawned, so there is no per-frame "is the mouse over X"
+checking anywhere. Resource: `OpenShop(Option<ShopTarget>)`; `None` despawns the panel.
+
+Not done yet: the world map as a UI texture instead of a generated image.
+
+---
+
+## 7. Roadmap
 
 - [x] Placeholder build: coloured squares, labels, states, grid, turn order, move + strike
 - [x] Unstack / Merge / Shield up, archer range, flanking
@@ -485,4 +612,6 @@ system; the pack's effects are frame strips, so none is needed).
 - [x] Unit sprites with idle / run / attack / guard
 - [x] Arrows and death dust
 - [x] Tower and base building sprites with the capture animation
-- [ ] UI sprites; water foam; hit and heal effects
+- [x] Shop panel and castle panel with the pack's UI (wood table, paper, buttons, ribbons, avatars)
+- [x] Combat HUD with the pack's UI (turn queue of avatars, ribbons, red buttons)
+- [ ] Water foam; hit and heal effects

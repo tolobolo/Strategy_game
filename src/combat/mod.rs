@@ -37,6 +37,7 @@ impl Plugin for CombatPlugin {
             .add_systems(
                 Update,
                 (
+                    hud::wire_combat_buttons,
                     hud::refresh_stack_labels,
                     hud::refresh_turn_strip,
                     hud::refresh_panel,

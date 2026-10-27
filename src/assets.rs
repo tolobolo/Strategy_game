@@ -45,6 +45,26 @@ pub struct GameAssets {
     pub fx: HashMap<Fx, Strip>,
     /// `buildings/<colour>_buildings/<kind>.png` per faction and kind.
     pub buildings: HashMap<(Faction, BuildingKind), Handle<Image>>,
+    pub ui: UiAssets,
+}
+
+/// Nine-slice panels and buttons stitched from the pack's UI sheets (`ui_elements/generated/`).
+#[derive(Default)]
+pub struct UiAssets {
+    pub wood_table: Handle<Image>,
+    pub paper: Handle<Image>,
+    pub button_regular: Handle<Image>,
+    pub button_pressed: Handle<Image>,
+    /// `icons/icon_09.png`, the red X.
+    pub icon_close: Handle<Image>,
+    /// `icons/icon_03.png`, the coin: shown instead of the word "gold".
+    pub icon_gold: Handle<Image>,
+    /// `icons/icon_05.png`, the sword: shown instead of the word "army".
+    pub icon_army: Handle<Image>,
+    /// `ui_elements/generated/ribbon_<colour>_3.png`, one big ribbon per kingdom colour.
+    pub ribbons: HashMap<Faction, Handle<Image>>,
+    /// `ui_elements/generated/ribbon_small_<colour>_3.png` (188×60, caps 62 px).
+    pub small_ribbons: HashMap<Faction, Handle<Image>>,
 }
 
 /// Scale that fits a building sprite onto its footprint (measured sizes in agents.md §5).
@@ -203,6 +223,27 @@ fn load_assets(server: &AssetServer, layouts: &mut Assets<TextureAtlasLayout>) -
     for fx in Fx::ALL {
         let (file, frame, frames) = fx.sheet();
         assets.fx.insert(fx, strip(server, layouts, file, UVec2::splat(frame), frames));
+    }
+    assets.ui = UiAssets {
+        wood_table: server.load("ui_elements/generated/wood_table_9.png"),
+        paper: server.load("ui_elements/generated/regular_paper_9.png"),
+        button_regular: server.load("ui_elements/generated/big_red_button_regular_9.png"),
+        button_pressed: server.load("ui_elements/generated/big_red_button_pressed_9.png"),
+        icon_close: server.load("ui_elements/ui_elements/icons/icon_09.png"),
+        icon_gold: server.load("ui_elements/ui_elements/icons/icon_03.png"),
+        icon_army: server.load("ui_elements/ui_elements/icons/icon_05.png"),
+        ribbons: HashMap::new(),
+        small_ribbons: HashMap::new(),
+    };
+    for (faction, colour) in [
+        (Faction::Reclaimers, "blue"),
+        (Faction::Red, "red"),
+        (Faction::Yellow, "yellow"),
+        (Faction::Purple, "purple"),
+        (Faction::Black, "black"),
+    ] {
+        assets.ui.ribbons.insert(faction, server.load(format!("ui_elements/generated/ribbon_{colour}_3.png")));
+        assets.ui.small_ribbons.insert(faction, server.load(format!("ui_elements/generated/ribbon_small_{colour}_3.png")));
     }
     for faction in [Faction::Reclaimers, Faction::Red, Faction::Purple, Faction::Yellow, Faction::Black] {
         for kind in BuildingKind::ALL {

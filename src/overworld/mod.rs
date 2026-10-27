@@ -4,10 +4,13 @@
 //! overworld state is entered, `spawn_overworld` rebuilds the entities from it.
 
 pub mod armies;
+pub mod army_panel;
 pub mod buildings;
+pub mod castle_panel;
 pub mod economy;
 pub mod interact;
 pub mod map;
+pub mod shop;
 pub mod terrain;
 pub mod world;
 
@@ -22,6 +25,7 @@ use crate::assets::{
 };
 use crate::faction::Faction;
 use crate::states::GameState;
+use crate::ui::{army_stat, big_ribbon, gold_stat};
 use crate::units::{HERO_SLOTS, PlayerArmy, Team, UnitKind};
 use buildings::BuildingKind;
 use economy::{INCOME_INTERVAL_SECS, TOWER_INCOME};
@@ -52,8 +56,17 @@ pub struct Layer(pub u8);
 #[derive(Component)]
 struct HeroSprite;
 
+/// The numbers and lines of the overworld HUD; each is refreshed by `refresh_overworld_hud`.
 #[derive(Component)]
-struct OverworldHud;
+struct HudGold;
+#[derive(Component)]
+struct HudArmy;
+/// Castles, towers and layer.
+#[derive(Component)]
+struct HudInfo;
+/// What you are touching, and the last message.
+#[derive(Component)]
+struct HudPrompt;
 
 #[derive(Component)]
 struct LandUnitedBanner;
@@ -87,6 +100,10 @@ impl Plugin for OverworldPlugin {
             .init_resource::<PlayerArmy>()
             .init_resource::<Nearby>()
             .init_resource::<map::WorldMapOpen>()
+            .init_resource::<shop::OpenShop>()
+            .init_resource::<castle_panel::OpenCastle>()
+            .init_resource::<army_panel::OpenArmy>()
+            .init_resource::<army_panel::ArmyPanelShown>()
             .add_plugins(economy::EconomyPlugin)
             .add_systems(OnEnter(GameState::Overworld), spawn_overworld)
             .add_systems(
@@ -107,7 +124,9 @@ impl Plugin for OverworldPlugin {
                     capture_visuals,
                     interact::trigger_fights,
                     armies::roamer_encounters,
-                    map::toggle_world_map,
+                    (map::toggle_world_map, shop::toggle_shop, shop::wire_shop_buttons, shop::refresh_shop_status, shop::animate_ui_images).chain(),
+                    (castle_panel::toggle_castle, castle_panel::wire_castle_buttons, castle_panel::refresh_castle_panel).chain(),
+                    (army_panel::toggle_army, army_panel::refresh_army_panel, army_panel::wire_army_buttons, army_panel::refresh_army_slots).chain(),
                     refresh_overworld_hud,
                 )
                     .chain()
@@ -492,21 +511,44 @@ fn spawn_overworld(
         ],
     ));
 
-    // HUD.
+    // HUD: a stats row (coin, sword, castles / towers / layer) and a prompt line under it.
     commands.spawn((
-        OverworldHud,
-        Text::new(""),
-        TextFont { font_size: FontSize::Px(18.0), ..default() },
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(12.0),
             top: Val::Px(10.0),
             padding: UiRect::all(Val::Px(8.0)),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(4.0),
             ..default()
         },
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
         Pickable::IGNORE,
         DespawnOnExit(GameState::Overworld),
+        children![
+            (
+                Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(22.0), ..default() },
+                Pickable::IGNORE,
+                children![
+                    gold_stat(&assets, HudGold, 18.0),
+                    army_stat(&assets, HudArmy, 18.0),
+                    (
+                        HudInfo,
+                        Text::new(""),
+                        TextFont { font_size: FontSize::Px(18.0), ..default() },
+                        TextColor(Color::WHITE),
+                        Pickable::IGNORE,
+                    ),
+                ],
+            ),
+            (
+                HudPrompt,
+                Text::new(""),
+                TextFont { font_size: FontSize::Px(18.0), ..default() },
+                TextColor(Color::WHITE),
+                Pickable::IGNORE,
+            ),
+        ],
     ));
     commands.spawn((
         LandUnitedBanner,
@@ -520,15 +562,8 @@ fn spawn_overworld(
         Visibility::Hidden,
         Pickable::IGNORE,
         DespawnOnExit(GameState::Overworld),
-        children![(
-            Text::new("YOU UNITED THE LAND!\nEvery castle is yours."),
-            TextFont { font_size: FontSize::Px(44.0), ..default() },
-            TextColor(Team::Player.color()),
-            TextLayout::justify(Justify::Center),
-            Node { padding: UiRect::all(Val::Px(30.0)), ..default() },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)),
-            Pickable::IGNORE,
-        )],
+        // The last win: the whole message on one big ribbon.
+        children![big_ribbon(&assets, Faction::Reclaimers, "YOU UNITED THE LAND!\nEvery castle is yours.", 2.2)],
     ));
 }
 
@@ -606,15 +641,18 @@ fn refresh_overworld_hud(
     army: Res<PlayerArmy>,
     nearby: Res<Nearby>,
     hero: Single<&Layer, With<Hero>>,
-    mut hud: Single<&mut Text, With<OverworldHud>>,
+    mut hud: ParamSet<(
+        Single<&mut Text, With<HudGold>>,
+        Single<&mut Text, With<HudArmy>>,
+        Single<&mut Text, With<HudInfo>>,
+        Single<&mut Text, With<HudPrompt>>,
+    )>,
     mut banner: Single<&mut Visibility, With<LandUnitedBanner>>,
 ) {
-    let status = format!(
-        "Gold {}    Army {}/{}: {}    Castles {}/{}    Towers {}/{}    Layer {}",
-        treasuries.player_gold(),
-        army.0.slots(),
-        HERO_SLOTS,
-        army.0.summary(),
+    let gold = treasuries.player_gold().to_string();
+    let slots = format!("{}/{}  {}", army.0.slots(), HERO_SLOTS, army.0.summary());
+    let info = format!(
+        "Castles {}/{}    Towers {}/{}    Layer {}",
         world.castles_owned(),
         world.bases.len(),
         world.towers_owned(),
@@ -624,14 +662,14 @@ fn refresh_overworld_hud(
 
     let prompt = match nearby.touch {
         Some(Touch::Castle(i)) if world.bases[i].owner.is_player() => format!(
-            "YOUR CASTLE  garrison {}/30: {}\n1 W  2 A  3 L  4 M  5 P: take one   Shift+key: store one   hold Ctrl: all",
+            "YOUR CASTLE  garrison {}/30: {}\nTab: open the castle   1 W  2 A  3 L  4 M  5 P: take one   Shift+key: store one   hold Ctrl: all",
             world.bases[i].garrison.slots(),
             world.bases[i].garrison.summary()
         ),
         Some(Touch::Castle(i)) => format!("Castle of the {}. Touching it attacks!", world.bases[i].owner.name()),
         Some(Touch::Shop { base, kind }) if world.bases[base].owner.is_player() => {
             let unit = kind.sells().unwrap();
-            format!("{}: E = hire a {} for {}g", kind.name(), unit.name(), unit.price())
+            format!("{}: Tab = open the shop   R = hire a {} for {}g", kind.name(), unit.name(), unit.price())
         }
         Some(Touch::Shop { base, kind }) => {
             format!("{} of the {}. Take their castle to use it.", kind.name(), world.bases[base].owner.name())
@@ -645,18 +683,26 @@ fn refresh_overworld_hud(
         },
         Some(Touch::Seller(i)) => {
             let unit = world.sellers[i].unit;
-            format!("Idle {}: E = hire for {}g", unit.name(), unit.price())
+            format!("Idle {}: Tab = open the shop   R = hire for {}g", unit.name(), unit.price())
         }
-        None => "WASD: move.  M: world map.  Walk into buildings, towers and armies to use or attack them.  Red circles: bandits.  Stairs lead up to the high ground.".to_string(),
+        None => "WASD: move.  E: your army.  M: world map.  Walk into buildings, towers and armies to use or attack them.  Red circles: bandits.  Stairs lead up to the high ground.".to_string(),
     };
 
-    let mut text = format!("{status}\n{prompt}");
+    let mut text = prompt;
     if let Some(message) = &nearby.message {
         text.push('\n');
         text.push_str(message);
     }
-    if hud.0 != text {
-        hud.0 = text;
+    for (i, value) in [gold, slots, info, text].into_iter().enumerate() {
+        let mut target = match i {
+            0 => hud.p0().into_inner(),
+            1 => hud.p1().into_inner(),
+            2 => hud.p2().into_inner(),
+            _ => hud.p3().into_inner(),
+        };
+        if target.0 != value {
+            target.0 = value;
+        }
     }
 
     let wanted = if world.land_united() { Visibility::Visible } else { Visibility::Hidden };

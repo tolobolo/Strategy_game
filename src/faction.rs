@@ -45,14 +45,6 @@ impl Faction {
         }
     }
 
-    /// Text colour that stays readable on top of `color()`.
-    pub fn text_color(self) -> Color {
-        match self {
-            Faction::Yellow => Color::BLACK,
-            _ => Color::WHITE,
-        }
-    }
-
     /// Folder with this faction's building sprites, relative to `assets/` (agents.md §5).
     pub fn building_dir(self) -> &'static str {
         match self {

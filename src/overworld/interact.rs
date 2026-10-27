@@ -117,6 +117,21 @@ pub fn castle_transfer(
     };
     let store = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let all = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    transfer(&mut world, &mut player_army, &mut nearby, base, kind, store, all);
+}
+
+/// Move units of `kind` between the hero and the garrison of `base`: one, or all with `all`.
+/// `store` moves hero -> castle, otherwise castle -> hero. Used by the number keys and the
+/// castle panel's buttons.
+pub fn transfer(
+    world: &mut WorldState,
+    player_army: &mut PlayerArmy,
+    nearby: &mut Nearby,
+    base: usize,
+    kind: UnitKind,
+    store: bool,
+    all: bool,
+) {
     let garrison = &mut world.bases[base].garrison;
     let hero = &mut player_army.0;
 
@@ -141,7 +156,7 @@ pub fn castle_transfer(
     nearby.say(format!("{verb} {moved} {}.", kind.name()));
 }
 
-/// `E` at an own shop building or an idle seller buys one unit.
+/// `R` at an own shop building or an idle seller buys one unit (quick buy).
 pub fn buy_units(
     keys: Res<ButtonInput<KeyCode>>,
     mut nearby: ResMut<Nearby>,
@@ -149,7 +164,7 @@ pub fn buy_units(
     mut treasuries: ResMut<Treasuries>,
     mut player_army: ResMut<PlayerArmy>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyE) {
+    if !keys.just_pressed(KeyCode::KeyR) {
         return;
     }
     let unit = match nearby.touch {
@@ -162,16 +177,22 @@ pub fn buy_units(
         _ => None,
     };
     let Some(unit) = unit else { return };
+    try_buy(unit, &mut nearby, &mut treasuries, &mut player_army);
+}
+
+/// Hire one unit for the hero if there is room and gold. Used by `R` and the shop panel's button.
+pub fn try_buy(unit: UnitKind, nearby: &mut Nearby, treasuries: &mut Treasuries, player_army: &mut PlayerArmy) -> bool {
     if player_army.0.slots() >= HERO_SLOTS {
         nearby.say(format!("Your army is full ({HERO_SLOTS} units)."));
-        return;
+        return false;
     }
     if !treasuries.spend(Faction::Reclaimers, unit.price()) {
         nearby.say(format!("Not enough gold: {} costs {}g.", unit.name(), unit.price()));
-        return;
+        return false;
     }
     player_army.0.add(unit, 1);
     nearby.say(format!("Hired a {} for {}g.", unit.name(), unit.price()));
+    true
 }
 
 /// Touching an enemy castle or a tower you do not own attacks it. An undefended one is simply taken.

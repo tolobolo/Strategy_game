@@ -5,12 +5,14 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
-use super::actions::Dying;
+use super::actions::{ActionLock, CombatAction, Dying};
 use super::grid::{BattleGrid, GridPos, Tile};
 use super::turn::{AP_PER_TURN, ActionPoints, ActiveStack, CombatResult, TurnOrder};
+use crate::assets::GameAssets;
 use crate::faction::Faction;
 use crate::states::GameState;
-use crate::units::{ShieldUp, Stack, Team};
+use crate::ui::{avatar_handle, finish_banner, panel, sliced};
+use crate::units::{ShieldUp, Stack, Team, UnitKind};
 
 // ---------- resources ----------
 
@@ -61,19 +63,67 @@ pub fn count_text(stack: &Stack) -> String {
     format!("x{}  HP {}/{}", stack.count, stack.lead_hp, stack.stats().health)
 }
 
-fn panel_box() -> impl Bundle {
-    (
-        Node {
-            padding: UiRect::all(Val::Px(10.0)),
-            flex_direction: FlexDirection::Column,
-            ..default()
-        },
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-        Pickable::IGNORE,
-    )
+/// Marker on the three action buttons of the bottom panel.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum ActionButton {
+    Unstack,
+    ShieldUp,
+    EndTurn,
 }
 
-pub fn spawn_hud(mut commands: Commands) {
+/// Avatar of the active stack in the bottom panel.
+#[derive(Component)]
+pub struct PanelAvatar;
+/// The small ribbon behind the "<Kind>'s turn" header: blue on your turn, the enemy's kingdom
+/// colour on theirs.
+#[derive(Component)]
+pub struct PanelHeaderRibbon;
+/// `AP 2/3` next to the header.
+#[derive(Component)]
+pub struct PanelAp;
+/// The hovered stack line.
+#[derive(Component)]
+pub struct HoverText;
+
+fn wood() -> NodeImageMode {
+    sliced(84.0, 84.0, 85.0, 103.0)
+}
+fn paper_mode() -> NodeImageMode {
+    sliced(52.0, 52.0, 44.0, 45.0)
+}
+fn button_regular_mode() -> NodeImageMode {
+    sliced(45.0, 45.0, 47.0, 47.0)
+}
+fn button_pressed_mode() -> NodeImageMode {
+    sliced(50.0, 50.0, 36.0, 49.0)
+}
+fn small_ribbon_mode() -> NodeImageMode {
+    sliced(62.0, 62.0, 0.0, 0.0)
+}
+
+/// Top strip (turn order on a wood bar), bottom left (wood table: whose turn, active stack on
+/// paper, hovered stack, action buttons), bottom right (the log on paper).
+pub fn spawn_hud(mut commands: Commands, assets: Res<GameAssets>) {
+    let button = |label: &str, which: ActionButton| {
+        (
+            which,
+            panel(assets.ui.button_regular.clone(), button_regular_mode()),
+            Node {
+                width: Val::Px(150.0),
+                height: Val::Px(58.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            children![(
+                Text::new(label.to_string()),
+                TextFont { font_size: FontSize::Px(18.0), ..default() },
+                TextColor(Color::WHITE),
+                Pickable::IGNORE,
+            )],
+        )
+    };
+
     commands.spawn((
         Node {
             width: Val::Percent(100.0),
@@ -85,53 +135,139 @@ pub fn spawn_hud(mut commands: Commands) {
         Pickable::IGNORE,
         DespawnOnExit(GameState::Combat),
         children![
-            // Top: turn order strip (chips are rebuilt by refresh_turn_strip).
+            // Top: the turn order on a wood bar (chips are rebuilt by refresh_turn_strip).
             (
                 TurnStrip,
+                panel(assets.ui.wood_table.clone(), wood()),
                 Node {
                     flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
-                    column_gap: Val::Px(6.0),
-                    padding: UiRect::all(Val::Px(8.0)),
+                    column_gap: Val::Px(10.0),
+                    padding: UiRect::new(Val::Px(60.0), Val::Px(60.0), Val::Px(16.0), Val::Px(30.0)),
+                    align_self: AlignSelf::Center,
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
                 Pickable::IGNORE,
             ),
-            // Bottom: info panel on the left, log on the right.
+            // Bottom row.
             (
                 Node {
                     flex_direction: FlexDirection::Row,
                     justify_content: JustifyContent::SpaceBetween,
                     align_items: AlignItems::End,
+                    column_gap: Val::Px(10.0),
                     ..default()
                 },
                 Pickable::IGNORE,
                 children![
+                    // Info panel.
                     (
-                        panel_box(),
+                        panel(assets.ui.wood_table.clone(), wood()),
+                        Node {
+                            width: Val::Px(760.0),
+                            padding: UiRect::new(Val::Px(60.0), Val::Px(60.0), Val::Px(40.0), Val::Px(52.0)),
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(8.0),
+                            margin: UiRect::new(Val::Px(6.0), Val::Px(0.0), Val::Px(0.0), Val::Px(6.0)),
+                            ..default()
+                        },
+                        Pickable::IGNORE,
                         children![
+                            // Header: avatar, whose turn, AP.
                             (
-                                PanelHeader,
-                                Text::new(""),
-                                TextFont { font_size: FontSize::Px(26.0), ..default() },
+                                Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(14.0), ..default() },
                                 Pickable::IGNORE,
+                                children![
+                                    (
+                                        PanelAvatar,
+                                        ImageNode::new(Handle::default()).with_mode(NodeImageMode::Stretch),
+                                        Node { width: Val::Px(64.0), height: Val::Px(64.0), ..default() },
+                                        Pickable::IGNORE,
+                                    ),
+                                    (
+                                        PanelHeaderRibbon,
+                                        panel(assets.ui.small_ribbons[&Faction::Reclaimers].clone(), small_ribbon_mode()),
+                                        Node {
+                                            height: Val::Px(60.0),
+                                            min_width: Val::Px(260.0),
+                                            padding: UiRect::axes(Val::Px(70.0), Val::Px(0.0)),
+                                            justify_content: JustifyContent::Center,
+                                            align_items: AlignItems::Center,
+                                            ..default()
+                                        },
+                                        Pickable::IGNORE,
+                                        children![(
+                                            PanelHeader,
+                                            Text::new(""),
+                                            TextFont { font_size: FontSize::Px(22.0), ..default() },
+                                            TextColor(Color::WHITE),
+                                            Node { margin: UiRect::top(Val::Px(-6.0)), ..default() },
+                                            Pickable::IGNORE,
+                                        )],
+                                    ),
+                                    (
+                                        PanelAp,
+                                        Text::new(""),
+                                        TextFont { font_size: FontSize::Px(22.0), ..default() },
+                                        TextColor(Color::srgb(1.0, 0.9, 0.3)),
+                                        Pickable::IGNORE,
+                                    ),
+                                ],
+                            ),
+                            // Active stack stats on paper.
+                            (
+                                panel(assets.ui.paper.clone(), paper_mode()),
+                                Node { padding: UiRect::axes(Val::Px(30.0), Val::Px(18.0)), ..default() },
+                                Pickable::IGNORE,
+                                children![(
+                                    PanelText,
+                                    Text::new(""),
+                                    TextFont { font_size: FontSize::Px(16.0), ..default() },
+                                    TextColor(Color::srgb(0.22, 0.16, 0.10)),
+                                    Pickable::IGNORE,
+                                )],
                             ),
                             (
-                                PanelText,
+                                HoverText,
                                 Text::new(""),
-                                TextFont { font_size: FontSize::Px(16.0), ..default() },
+                                TextFont { font_size: FontSize::Px(15.0), ..default() },
+                                TextColor(Color::srgb(0.92, 0.9, 0.82)),
                                 Pickable::IGNORE,
+                            ),
+                            // Buttons.
+                            (
+                                Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(12.0), align_items: AlignItems::Center, ..default() },
+                                Pickable::IGNORE,
+                                children![
+                                    button("UNSTACK  1", ActionButton::Unstack),
+                                    button("SHIELD  3", ActionButton::ShieldUp),
+                                    button("END TURN", ActionButton::EndTurn),
+                                    (
+                                        Text::new("click a lit tile: move   click an enemy: strike   click your own touching stack: merge"),
+                                        TextFont { font_size: FontSize::Px(13.0), ..default() },
+                                        TextColor(Color::srgb(0.85, 0.82, 0.75)),
+                                        Node { max_width: Val::Px(220.0), ..default() },
+                                        Pickable::IGNORE,
+                                    ),
+                                ],
                             ),
                         ],
                     ),
+                    // Log on paper.
                     (
-                        panel_box(),
+                        panel(assets.ui.paper.clone(), paper_mode()),
+                        Node {
+                            width: Val::Px(520.0),
+                            padding: UiRect::axes(Val::Px(36.0), Val::Px(26.0)),
+                            margin: UiRect::new(Val::Px(0.0), Val::Px(8.0), Val::Px(0.0), Val::Px(8.0)),
+                            ..default()
+                        },
+                        Pickable::IGNORE,
                         children![(
                             LogText,
                             Text::new(""),
-                            TextFont { font_size: FontSize::Px(15.0), ..default() },
-                            TextColor(Color::srgb(0.9, 0.9, 0.8)),
+                            TextFont { font_size: FontSize::Px(14.0), ..default() },
+                            TextColor(Color::srgb(0.22, 0.16, 0.10)),
                             Pickable::IGNORE,
                         )],
                     ),
@@ -141,6 +277,47 @@ pub fn spawn_hud(mut commands: Commands) {
     ));
 }
 
+/// Attach the click behaviour to the action buttons once they exist.
+pub fn wire_combat_buttons(mut commands: Commands, buttons: Query<Entity, Added<ActionButton>>) {
+    for entity in &buttons {
+        commands.entity(entity).observe(on_button_press).observe(on_button_release).observe(on_button_click);
+    }
+}
+
+fn on_button_press(press: On<Pointer<Press>>, assets: Res<GameAssets>, mut images: Query<&mut ImageNode, With<ActionButton>>) {
+    if let Ok(mut image) = images.get_mut(press.entity) {
+        image.image = assets.ui.button_pressed.clone();
+        image.image_mode = button_pressed_mode();
+    }
+}
+
+fn on_button_release(release: On<Pointer<Release>>, assets: Res<GameAssets>, mut images: Query<&mut ImageNode, With<ActionButton>>) {
+    if let Ok(mut image) = images.get_mut(release.entity) {
+        image.image = assets.ui.button_regular.clone();
+        image.image_mode = button_regular_mode();
+    }
+}
+
+/// The buttons do exactly what the keys 1 / 3 / Space do, and only on your turn.
+fn on_button_click(
+    click: On<Pointer<Click>>,
+    buttons: Query<&ActionButton>,
+    lock: Res<ActionLock>,
+    active: Query<&Team, With<ActiveStack>>,
+    mut actions: MessageWriter<CombatAction>,
+) {
+    if click.event.button != PointerButton::Primary || lock.is_locked() || !matches!(active.single(), Ok(Team::Player)) {
+        return;
+    }
+    if let Ok(button) = buttons.get(click.entity) {
+        actions.write(match button {
+            ActionButton::Unstack => CombatAction::Unstack,
+            ActionButton::ShieldUp => CombatAction::ShieldUp,
+            ActionButton::EndTurn => CombatAction::EndTurn,
+        });
+    }
+}
+
 /// Keep the `x12  HP 7/10` label in sync with its stack.
 pub fn refresh_stack_labels(
     changed: Query<(&Stack, &Children), Changed<Stack>>,
@@ -148,16 +325,21 @@ pub fn refresh_stack_labels(
 ) {
     for (stack, children) in &changed {
         for child in children.iter() {
-            if let Ok(mut text) = labels.get_mut(child) {
-                text.0 = count_text(stack);
+            if let Ok(mut label) = labels.get_mut(child) {
+                label.0 = count_text(stack);
             }
         }
     }
 }
 
-/// Rebuild the strip of chips whenever the order, a stack or the active stack changes.
+/// The turn order as a queue of avatars (yours blue, the enemy's in its kingdom colour) with the
+/// count under each. Whoever acts stands at the far left, bigger and on a small ribbon in its
+/// team's colour; when it is done it drops to the far right and everyone shifts left.
+#[allow(clippy::too_many_arguments)]
 pub fn refresh_turn_strip(
     mut commands: Commands,
+    assets: Res<GameAssets>,
+    server: Res<AssetServer>,
     order: Res<TurnOrder>,
     strip: Single<Entity, With<TurnStrip>>,
     stacks: Query<(&Stack, &Team, &Faction), Without<Dying>>,
@@ -176,52 +358,57 @@ pub fn refresh_turn_strip(
     let strip = *strip;
     commands.entity(strip).despawn_related::<Children>();
 
-    let title = commands
-        .spawn((
-            Text::new("Turn order:"),
-            TextFont { font_size: FontSize::Px(16.0), ..default() },
-            Pickable::IGNORE,
-        ))
-        .id();
-    commands.entity(strip).add_child(title);
-
-    for (i, entity) in order.order.iter().enumerate() {
-        let Ok((stack, team, faction)) = stacks.get(*entity) else {
+    let n = order.order.len();
+    // Rotate so the acting stack comes first.
+    for step in 0..n {
+        let i = (order.current + step) % n;
+        let entity = order.order[i];
+        let Ok((stack, team, faction)) = stacks.get(entity) else {
             continue; // destroyed
         };
-        let current = i == order.current;
-        let chip = commands
-            .spawn((
-                Node {
-                    padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
-                    border: UiRect::all(Val::Px(if current { 4.0 } else { 2.0 })),
-                    ..default()
-                },
-                BackgroundColor(faction.color()),
-                BorderColor::all(team.color()),
+        let current = step == 0;
+        let size = if current { 64.0 } else { 44.0 };
+        let ribbon_colour = match team {
+            Team::Player => Faction::Reclaimers,
+            Team::Enemy => Faction::Red,
+        };
+        let mut chip = commands.spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                padding: UiRect::axes(Val::Px(if current { 26.0 } else { 4.0 }), Val::Px(2.0)),
+                ..default()
+            },
+            Pickable::IGNORE,
+        ));
+        if current {
+            chip.insert(panel(assets.ui.small_ribbons[&ribbon_colour].clone(), small_ribbon_mode()));
+        }
+        chip.with_children(|c| {
+            c.spawn((
+                ImageNode::new(avatar_handle(&server, *faction, stack.kind)).with_mode(NodeImageMode::Stretch),
+                Node { width: Val::Px(size), height: Val::Px(size), ..default() },
                 Pickable::IGNORE,
-                children![(
-                    Text::new(format!(
-                        "{}{}",
-                        if current { "> " } else { "" },
-                        stack.short_label()
-                    )),
-                    TextFont { font_size: FontSize::Px(if current { 22.0 } else { 15.0 }), ..default() },
-                    TextColor(faction.text_color()),
-                    Pickable::IGNORE,
-                )],
-            ))
-            .id();
+            ));
+            c.spawn((
+                Text::new(format!("x{}", stack.count)),
+                TextFont { font_size: FontSize::Px(if current { 16.0 } else { 13.0 }), ..default() },
+                TextColor(team.color()),
+                Node { margin: UiRect::top(Val::Px(-6.0)), ..default() },
+                Pickable::IGNORE,
+            ));
+        });
+        let chip = chip.id();
         commands.entity(strip).add_child(chip);
     }
 }
 
 fn describe(stack: &Stack, team: Team, faction: Faction, shield: Option<&ShieldUp>) -> String {
     let s = stack.stats();
-    let shield = shield.map_or(String::new(), |sh| format!("  SHIELD +{}", sh.0));
-    let range = if stack.is_ranged() { format!("  range {}-{}", s.range.0, s.range.1) } else { String::new() };
+    let shield = shield.map_or(String::new(), |sh| format!("   SHIELD +{}", sh.0));
+    let range = if stack.is_ranged() { format!("   RANGE {}-{}", s.range.0, s.range.1) } else { String::new() };
     format!(
-        "{} {} x{}  ({})  HP {}/{}  def {}  speed {}  dmg {}-{} ({} roll){}{}",
+        "{} {} x{}  ({})\nHP {}/{}   DEF {}   SPD {}   ATK {}-{} ({} roll){}{}",
         team.label(),
         stack.kind.name(),
         stack.count,
@@ -238,20 +425,35 @@ fn describe(stack: &Stack, team: Team, faction: Faction, shield: Option<&ShieldU
     )
 }
 
-/// Bottom-left panel: whose turn, active stack stats, hovered stack, controls. Bottom-right: log.
-#[allow(clippy::type_complexity)]
+/// Bottom-left panel: whose turn, AP, the active stack's avatar and stats, the hovered stack.
+/// Bottom-right: the log.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn refresh_panel(
+    server: Res<AssetServer>,
     active: Query<(&Stack, &Team, &Faction, &ActionPoints, Option<&ShieldUp>), With<ActiveStack>>,
     stacks: Query<(&Stack, &Team, &Faction, Option<&ShieldUp>)>,
     hovered: Res<Hovered>,
     log: Res<CombatLog>,
     result: Option<Res<CombatResult>>,
-    mut header: Single<(&mut Text, &mut TextColor), With<PanelHeader>>,
-    mut panel: Single<&mut Text, (With<PanelText>, Without<PanelHeader>, Without<LogText>)>,
-    mut log_text: Single<&mut Text, (With<LogText>, Without<PanelHeader>, Without<PanelText>)>,
+    mut texts: ParamSet<(
+        Single<(&mut Text, &mut TextColor), With<PanelHeader>>,
+        Single<&mut Text, With<PanelAp>>,
+        Single<&mut Text, With<PanelText>>,
+        Single<&mut Text, With<HoverText>>,
+        Single<&mut Text, With<LogText>>,
+    )>,
+    assets: Res<GameAssets>,
+    mut avatar: Single<&mut ImageNode, (With<PanelAvatar>, Without<PanelHeaderRibbon>)>,
+    mut ribbon: Single<&mut ImageNode, (With<PanelHeaderRibbon>, Without<PanelAvatar>)>,
+    mut shown_avatar: Local<Option<(Faction, UnitKind)>>,
+    mut shown_ribbon: Local<Option<Faction>>,
 ) {
+    let mut header = texts.p0();
     let (header_text, header_color) = &mut *header;
-    let mut lines = Vec::new();
+    let mut ap_text = String::new();
+    let mut stats = String::new();
+    // Ribbon colour: blue for you, the enemy's kingdom colour for them.
+    let mut ribbon_colour = Faction::Reclaimers;
 
     match (result.as_deref(), active.single()) {
         (Some(CombatResult::Victory { .. }), _) => {
@@ -263,12 +465,19 @@ pub fn refresh_panel(
             header_color.0 = Team::Enemy.color();
         }
         (None, Ok((stack, team, faction, ap, shield))) => {
-            header_text.0 = match team {
-                Team::Player => "YOUR TURN".to_string(),
-                Team::Enemy => "ENEMY TURN".to_string(),
+            header_text.0 = format!("{}'s turn", stack.kind.name());
+            header_color.0 = Color::WHITE;
+            ribbon_colour = match team {
+                Team::Player => Faction::Reclaimers,
+                Team::Enemy => *faction,
             };
-            header_color.0 = team.color();
-            lines.push(format!("AP {}/{}   {}", ap.0, AP_PER_TURN, describe(stack, *team, *faction, shield)));
+            ap_text = format!("AP {}/{}", ap.0, AP_PER_TURN);
+            stats = describe(stack, *team, *faction, shield);
+            let key = (*faction, stack.kind);
+            if *shown_avatar != Some(key) {
+                *shown_avatar = Some(key);
+                avatar.image = avatar_handle(&server, *faction, stack.kind);
+            }
         }
         (None, Err(_)) => {
             header_text.0 = "...".to_string();
@@ -276,19 +485,29 @@ pub fn refresh_panel(
         }
     }
 
-    match hovered.0.and_then(|e| stacks.get(e).ok()) {
-        Some((stack, team, faction, shield)) => {
-            lines.push(format!("Hover: {}", describe(stack, *team, *faction, shield)))
-        }
-        None => lines.push("Hover a stack to inspect it.".to_string()),
+    drop(header);
+    if *shown_ribbon != Some(ribbon_colour) {
+        *shown_ribbon = Some(ribbon_colour);
+        ribbon.image = assets.ui.small_ribbons[&ribbon_colour].clone();
     }
-    lines.push(String::new());
-    lines.push("Green border = YOUR stacks     Red border = ENEMY stacks".to_string());
-    lines.push("Click a lit tile: Move   Click an enemy: Strike (melee: any of the 8 tiles around you; archers: 2-4 tiles away)".to_string());
-    lines.push("Click an own touching stack of the same kind: Merge   1: Unstack   3: Shield up   Space: End turn".to_string());
-    panel.0 = lines.join("\n");
 
-    log_text.0 = log.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+    let hover = match hovered.0.and_then(|e| stacks.get(e).ok()) {
+        Some((stack, team, faction, shield)) => format!("Hover: {}", describe(stack, *team, *faction, shield).replace('\n', "   ")),
+        None => "Hover a stack to inspect it.   Green = yours, red = enemy.".to_string(),
+    };
+    let log_lines = log.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+
+    for (i, value) in [ap_text, stats, hover, log_lines].into_iter().enumerate() {
+        let mut text = match i {
+            0 => texts.p1().into_inner(),
+            1 => texts.p2().into_inner(),
+            2 => texts.p3().into_inner(),
+            _ => texts.p4().into_inner(),
+        };
+        if text.0 != value {
+            text.0 = value;
+        }
+    }
 }
 
 /// Park the yellow halo behind the active stack and pulse it.
@@ -343,14 +562,19 @@ fn lighten(color: Color, amount: f32) -> Color {
 }
 
 /// Big centred banner when the battle is over.
-pub fn show_result(mut commands: Commands, result: Res<CombatResult>) {
-    let (text, color) = match *result {
+pub fn show_result(mut commands: Commands, assets: Res<GameAssets>, result: Res<CombatResult>) {
+    // Blue ribbon for a win, red for a loss.
+    let (title, ribbon, text, color) = match *result {
         CombatResult::Victory { loot } => (
-            format!("VICTORY\n+{loot} gold looted\n\nSpace: back to the overworld"),
+            "VICTORY",
+            Faction::Reclaimers,
+            format!("+{loot} gold looted\n\nSpace: back to the overworld"),
             Team::Player.color(),
         ),
         CombatResult::Defeat { gold_lost } => (
-            format!("DEFEAT\nyour army is lost and {gold_lost} gold taken\n\nSpace: back to the overworld"),
+            "DEFEAT",
+            Faction::Red,
+            format!("Your army is lost and {gold_lost} gold taken\n\nSpace: back to the overworld"),
             Team::Enemy.color(),
         ),
     };
@@ -364,22 +588,6 @@ pub fn show_result(mut commands: Commands, result: Res<CombatResult>) {
         },
         Pickable::IGNORE,
         DespawnOnExit(GameState::Combat),
-        children![(
-            Node {
-                padding: UiRect::all(Val::Px(30.0)),
-                border: UiRect::all(Val::Px(4.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)),
-            BorderColor::all(color),
-            Pickable::IGNORE,
-            children![(
-                Text::new(text),
-                TextFont { font_size: FontSize::Px(36.0), ..default() },
-                TextColor(color),
-                TextLayout::justify(Justify::Center),
-                Pickable::IGNORE,
-            )],
-        )],
+        children![finish_banner(&assets, ribbon, title, text, color)],
     ));
 }
