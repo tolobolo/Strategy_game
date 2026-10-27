@@ -185,7 +185,13 @@ pub fn trigger_fights(
 ) {
     let source = match nearby.touch {
         Some(Touch::Castle(i)) if !world.bases[i].owner.is_player() => EncounterSource::Base(i),
-        Some(Touch::Tower(i)) if !world.towers[i].owner.is_player() => EncounterSource::Tower(i),
+        Some(Touch::Tower(i)) if !world.towers[i].owner.is_player() => {
+            // An army in the middle of taking it blocks the door.
+            if world.tower_being_taken_by(i).is_some() {
+                return;
+            }
+            EncounterSource::Tower(i)
+        }
         _ => return,
     };
     if world.enemy_army_for(source).is_empty() {

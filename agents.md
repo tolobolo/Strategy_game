@@ -105,7 +105,8 @@ AI kingdoms and Black earn income too, so their loot grows while you wait.
 **AI kingdoms** each have 2 roaming armies. They walk to the nearest tower they do not own, **stand at
 it for 10 seconds** (the label counts down), and take it **without a fight**. Taking a tower costs the
 army a random **10–30 %** of its units, which stay behind as that tower's guard. The capture animation
-plays, then the army walks on to the next tower. They also take towers you own. AI armies never attack
+plays, then the army walks on to the next tower. **While an army is taking a tower (countdown and
+animation) the hero cannot enter it**; the HUD says who is taking it. They also take towers you own. AI armies never attack
 castles or the hero.
 
 AI armies and bandits **walk by the same rules as the hero**: A* (the `pathfinding` crate) over

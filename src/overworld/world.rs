@@ -146,6 +146,16 @@ pub fn starting_garrison(faction: Faction) -> Army {
 }
 
 impl WorldState {
+    /// The AI army standing at tower `i` taking it (or watching its capture), if any. While
+    /// that lasts the tower cannot be entered.
+    pub fn tower_being_taken_by(&self, i: usize) -> Option<Faction> {
+        use super::armies::AiArmyState;
+        self.armies
+            .iter()
+            .find(|a| a.alive && a.target == Some(i) && matches!(a.state, AiArmyState::Capturing(_) | AiArmyState::Leaving(_)))
+            .map(|a| a.faction)
+    }
+
     pub fn generate(seed: u64) -> Self {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut terrain = terrain::generate(seed, MAP_WIDTH, MAP_HEIGHT);

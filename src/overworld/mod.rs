@@ -639,7 +639,10 @@ fn refresh_overworld_hud(
         Some(Touch::Tower(i)) if world.towers[i].owner.is_player() => {
             format!("Your tower: +{TOWER_INCOME} gold every {INCOME_INTERVAL_SECS:.0} s")
         }
-        Some(Touch::Tower(i)) => format!("Tower of the {}. Touching it attacks!", world.towers[i].owner.name()),
+        Some(Touch::Tower(i)) => match world.tower_being_taken_by(i) {
+            Some(taker) => format!("Tower of the {}: the {} are taking it right now, you cannot get in.", world.towers[i].owner.name(), taker.name()),
+            None => format!("Tower of the {}. Touching it attacks!", world.towers[i].owner.name()),
+        },
         Some(Touch::Seller(i)) => {
             let unit = world.sellers[i].unit;
             format!("Idle {}: E = hire for {}g", unit.name(), unit.price())
