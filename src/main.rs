@@ -5,6 +5,7 @@ mod assets;
 mod combat;
 mod faction;
 mod overworld;
+mod shots;
 mod states;
 mod ui;
 mod units;
@@ -17,6 +18,9 @@ pub const WINDOW_WIDTH: u32 = 1600;
 pub const WINDOW_HEIGHT: u32 = 900;
 
 fn main() {
+    if map_mode() {
+        return;
+    }
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -41,10 +45,53 @@ fn main() {
             assets::GameAssetsPlugin,
             overworld::OverworldPlugin,
             combat::CombatPlugin,
+            shots::ShotsPlugin,
         ))
         .add_systems(Startup, spawn_camera)
         .add_systems(Update, fit_background)
         .run();
+}
+
+/// `cargo run -- map <seed> [--save]`: print the text stages of a world (the last with its
+/// ramps) and its stats, optionally save the final grid as a seed file, and exit without
+/// opening a window.
+fn map_mode() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) != Some("map") {
+        return false;
+    }
+    let seed: u64 = match args.get(1).and_then(|s| s.parse().ok()) {
+        Some(seed) => seed,
+        None => {
+            eprintln!("usage: cargo run -- map <seed> [--save]");
+            return true;
+        }
+    };
+    let (w, h) = (overworld::world::MAP_WIDTH, overworld::world::MAP_HEIGHT);
+    let raw = overworld::worldgen::raw(seed, w, h);
+    let warped = overworld::worldgen::warp(&raw, seed);
+    let layered = overworld::worldgen::layers(&warped, seed);
+    let smoothed = overworld::worldgen::smooth(&layered, seed);
+    let map = overworld::terrain::from_grid_with_ramps(&smoothed, seed);
+    let with_ramps = map.to_grid();
+    println!("== raw (patches) ==\n{}", raw.to_text());
+    println!("== warped ==\n{}", warped.to_text());
+    println!("== layered ==\n{}", layered.to_text());
+    println!("== smoothed ==\n{}", smoothed.to_text());
+    println!("== ramps (R) ==\n{}", with_ramps.to_text());
+    println!("stats: {} | ramps {} | flat patches {}", smoothed.stats(), map.ramps().count(), map.flat_patches().len());
+    for (layer, tile, size) in map.unreached_regions() {
+        println!("unreachable: layer {layer} plateau at {tile} ({size} tiles), no room for a ramp");
+    }
+    if args.iter().any(|a| a == "--save") {
+        let path = overworld::terrain::seed_path(seed);
+        let text = format!("# seed {seed}\n{}", with_ramps.to_text());
+        match std::fs::create_dir_all(overworld::terrain::SEEDS_DIR).and_then(|_| std::fs::write(&path, text)) {
+            Ok(()) => println!("saved {}", path.display()),
+            Err(e) => eprintln!("could not save {}: {e}", path.display()),
+        }
+    }
+    true
 }
 
 /// The sea-and-clouds picture behind everything, in both states. It is a child of the camera,

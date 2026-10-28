@@ -3,7 +3,7 @@
 
 use bevy::prelude::*;
 use rand::rngs::StdRng;
-use rand::seq::IndexedRandom;
+use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
 use super::armies::{self, AiArmy, BanditSquad};
@@ -16,8 +16,8 @@ use crate::units::{Army, UnitKind};
 pub const MAP_WIDTH: i32 = 64;
 pub const MAP_HEIGHT: i32 = 48;
 pub const TOWER_COUNT: usize = 6;
-/// Base centres start this many tiles apart (relaxed slowly if the map is too cramped).
-const BASE_MIN_DISTANCE: i32 = 14;
+/// Bases start this many patches apart (relaxed if the map is too cramped).
+const BASE_MIN_PATCH_DISTANCE: i32 = 3;
 /// Towers and sellers keep this far from base centres and from each other.
 const FEATURE_BASE_DISTANCE: i32 = 6;
 const FEATURE_MIN_DISTANCE: i32 = 5;
@@ -158,13 +158,12 @@ impl WorldState {
 
     pub fn generate(seed: u64) -> Self {
         let mut rng = StdRng::seed_from_u64(seed);
-        let mut terrain = terrain::generate(seed, MAP_WIDTH, MAP_HEIGHT);
+        let mut terrain = terrain::load_or_generate(seed, MAP_WIDTH, MAP_HEIGHT);
         let bases = place_bases(&mut terrain, &mut rng);
-        place_stairs(&mut terrain, &bases, &mut rng);
 
-        // Layer 3: towers and sellers prefer the peaks of a third noise field.
+        // Towers and sellers prefer the peaks of a separate noise field.
         let features = Noise::new(seed ^ 0xA5A5_5A5A_0F0F_F0F0);
-        let mut taken: Vec<IVec2> = terrain.stairs().collect();
+        let mut taken: Vec<IVec2> = terrain.ramps().map(|(ramp, _)| ramp).collect();
         let towers: Vec<Tower> =
             pick_feature_tiles(&terrain, &bases, &features, &mut rng, TOWER_COUNT, false, &mut taken)
                 .into_iter()
@@ -287,7 +286,7 @@ impl WorldState {
     pub fn random_walkable_tile(&self, rng: &mut impl Rng, away_from: IVec2, min_tiles: i32) -> IVec2 {
         for _ in 0..2000 {
             let tile = IVec2::new(rng.random_range(0..self.terrain.width), rng.random_range(0..self.terrain.height));
-            let ok = self.terrain.get(tile).is_some_and(Terrain::walkable)
+            let ok = self.terrain.is_walkable(tile)
                 && !self.in_any_base(tile)
                 && chebyshev(tile, away_from) >= min_tiles;
             if ok {
@@ -302,57 +301,48 @@ fn chebyshev(a: IVec2, b: IVec2) -> i32 {
     (a - b).abs().max_element()
 }
 
-/// One base per kingdom, spaced out, on grass only (so the hero can always reach it), then
-/// flattened to grass.
+/// One base per kingdom, each in its own flat grass patch (checked after smoothing), spaced apart
+/// in patches and relaxed if the map is cramped.
 fn place_bases(terrain: &mut TerrainMap, rng: &mut impl Rng) -> Vec<Base> {
-    let mut bases: Vec<Base> = Vec::new();
-    for faction in Faction::KINGDOMS {
-        let mut min_dist = BASE_MIN_DISTANCE;
-        let mut origin = None;
-        for attempt in 1..=6000 {
-            if attempt % 400 == 0 && min_dist > 4 {
-                min_dist -= 1;
-            }
-            let candidate = IVec2::new(
-                rng.random_range(1..MAP_WIDTH - BASE_SIZE.x - 1),
-                rng.random_range(1..MAP_HEIGHT - BASE_SIZE.y - 1),
-            );
-            let probe = Base { home: faction, owner: faction, prev_owner: None, origin: candidate, garrison: Army::empty(faction) };
-            let flat = probe.tiles().all(|t| terrain.get(t) == Some(Terrain::Grass));
-            let far = bases.iter().all(|b| chebyshev(b.centre(), probe.centre()) >= min_dist);
-            if flat && far {
-                origin = Some(candidate);
-                break;
-            }
-        }
-        // Fallback for a map that is almost all water or rock: build on it anyway.
-        let origin = origin.unwrap_or_else(|| {
-            IVec2::new(
-                2 + (bases.len() as i32 % 2) * (MAP_WIDTH - BASE_SIZE.x - 4),
-                2 + (bases.len() as i32 / 2) * (MAP_HEIGHT - BASE_SIZE.y - 4),
-            )
-        });
-        let base = Base { home: faction, owner: faction, prev_owner: None, origin, garrison: starting_garrison(faction) };
-        for tile in base.tiles() {
-            terrain.set(tile, Terrain::Grass);
-        }
-        bases.push(base);
-    }
-    bases
-}
-
-/// Every mountain region gets one staircase: a grass tile right below one of its south edges.
-fn place_stairs(terrain: &mut TerrainMap, bases: &[Base], rng: &mut impl Rng) {
-    for region in terrain.mountain_regions() {
-        let candidates: Vec<IVec2> = region
+    let count = terrain.patch_count();
+    let mut free: Vec<IVec2> = terrain.flat_patches();
+    free.shuffle(rng);
+    let mut chosen: Vec<IVec2> = Vec::new();
+    let mut min_dist = BASE_MIN_PATCH_DISTANCE;
+    while chosen.len() < Faction::KINGDOMS.len() {
+        let next = free
             .iter()
-            .map(|&t| t - IVec2::Y)
-            .filter(|&below| terrain.get(below) == Some(Terrain::Grass) && !bases.iter().any(|b| b.contains(below)))
-            .collect();
-        if let Some(&tile) = candidates.choose(rng) {
-            terrain.add_stairs(tile);
+            .copied()
+            .find(|p| !chosen.contains(p) && chosen.iter().all(|c| chebyshev(*c, *p) >= min_dist));
+        match next {
+            Some(p) => chosen.push(p),
+            None if min_dist > 1 => min_dist -= 1,
+            None => {
+                // Not enough grass patches at all: take any patch and flatten it.
+                let any = (0..count.y)
+                    .flat_map(|y| (0..count.x).map(move |x| IVec2::new(x, y)))
+                    .find(|p| !chosen.contains(p))
+                    .unwrap_or(IVec2::ZERO);
+                for tile in TerrainMap::patch_tiles(any) {
+                    terrain.set(tile, Terrain::Grass);
+                }
+                chosen.push(any);
+            }
         }
     }
+
+    Faction::KINGDOMS
+        .into_iter()
+        .zip(chosen)
+        .map(|(faction, patch)| {
+            let origin = TerrainMap::patch_origin(patch);
+            let base = Base { home: faction, owner: faction, prev_owner: None, origin, garrison: starting_garrison(faction) };
+            for tile in base.tiles() {
+                terrain.set(tile, Terrain::Grass);
+            }
+            base
+        })
+        .collect()
 }
 
 /// Pick `count` tiles for towers or sellers: random candidates scored by the feature noise,
@@ -370,8 +360,10 @@ fn pick_feature_tiles(
         let ground = terrain.get(tile);
         let walkable = if grass_only { ground == Some(Terrain::Grass) } else { ground.is_some_and(Terrain::walkable) };
         walkable
-            && !terrain.is_stairs(tile)
-            && terrain.get(tile + IVec2::Y) != Some(Terrain::Mountain) // keep off the cliff faces
+            && !terrain.is_ramp(tile)
+            && !terrain.is_ramp(tile + IVec2::Y) // nor under a ramp's slope
+            && !terrain.is_ramp_entry(tile) // nor in its way
+            && !terrain.is_cliff_foot(tile) // keep off the cliff faces
             && bases.iter().all(|b| chebyshev(b.centre(), tile) >= FEATURE_BASE_DISTANCE && !b.contains(tile))
     };
     let mut candidates: Vec<(f32, IVec2)> = (0..800)
@@ -395,7 +387,8 @@ fn pick_feature_tiles(
 }
 
 /// Trees, bushes and rocks on land (denser trees where the moisture noise is high), rocks and
-/// rubber ducks in the water. Never on bases, stairs, cliff faces or feature tiles.
+/// rubber ducks in the water. Never on bases, walls, ramps, plateau edges or feature tiles; trees
+/// also stay a tile away from those.
 fn place_decorations(
     terrain: &TerrainMap,
     bases: &[Base],
@@ -417,9 +410,13 @@ fn place_decorations(
                 }
             }
             Terrain::Grass | Terrain::Mountain => {
+                // Nothing on walls, ramps or plateau edges; a tree's wide canopy also keeps its
+                // eight neighbours clear of them.
+                let around_edge = |radius: i32| {
+                    (-radius..=radius).any(|dx| (-radius..=radius).any(|dy| terrain.is_edge_art(tile + IVec2::new(dx, dy))))
+                };
                 let blocked = bases.iter().any(|b| chebyshev(b.centre(), tile) <= 3)
-                    || terrain.is_stairs(tile)
-                    || terrain.get(tile + IVec2::Y) == Some(Terrain::Mountain)
+                    || around_edge(0)
                     || taken.contains(&tile);
                 if blocked {
                     None
@@ -427,7 +424,7 @@ fn place_decorations(
                     let m = moisture.fbm(tile.x as f32 / 8.0, tile.y as f32 / 8.0, 3);
                     let roll: f32 = rng.random();
                     let tree_chance = if ground == Terrain::Grass { 0.01 + 0.10 * m * m } else { 0.02 };
-                    if roll < tree_chance {
+                    if roll < tree_chance && !around_edge(1) {
                         Some(DecorationKind::Tree(rng.random_range(0..4)))
                     } else if roll < tree_chance + 0.03 {
                         Some(DecorationKind::Bush(rng.random_range(0..4)))
@@ -466,7 +463,7 @@ mod tests {
             }
             for (i, a) in world.bases.iter().enumerate() {
                 for b in &world.bases[i + 1..] {
-                    assert!(chebyshev(a.centre(), b.centre()) >= 4, "bases too close (seed {seed})");
+                    assert!(a.origin != b.origin, "two bases in one patch (seed {seed})");
                 }
             }
             assert!(world.terrain.walkable_at(world.hero_home_pos()));
@@ -475,22 +472,19 @@ mod tests {
     }
 
     #[test]
-    fn every_mountain_region_with_a_south_edge_has_stairs() {
+    fn ramps_are_climbable_and_features_keep_off_them() {
         let world = WorldState::generate(11);
-        let stairs: Vec<IVec2> = world.terrain.stairs().collect();
-        assert!(!stairs.is_empty());
-        for tile in &stairs {
-            assert_eq!(world.terrain.get(*tile), Some(Terrain::Grass));
-            assert_eq!(world.terrain.get(*tile + IVec2::Y), Some(Terrain::Mountain));
-            assert!(world.terrain.can_step(*tile, *tile + IVec2::Y));
+        let ramps: Vec<IVec2> = world.terrain.ramps().map(|(r, _)| r).collect();
+        assert!(!ramps.is_empty());
+        for ramp in &ramps {
+            let top = world.terrain.ramp_top(*ramp).unwrap();
+            assert!(world.terrain.can_step(*ramp, top) && world.terrain.can_step(top, *ramp));
+            let off = |t: IVec2| !world.terrain.is_ramp(t) && !world.terrain.is_ramp_entry(t);
+            assert!(world.towers.iter().all(|t| off(t.tile)));
+            assert!(world.sellers.iter().all(|s| off(s.tile)));
         }
-        for region in world.terrain.mountain_regions() {
-            let has_south_grass = region.iter().any(|&t| {
-                world.terrain.get(t - IVec2::Y) == Some(Terrain::Grass) && !world.in_any_base(t - IVec2::Y)
-            });
-            let has_stairs = region.iter().any(|&t| world.terrain.is_stairs(t - IVec2::Y));
-            assert!(!has_south_grass || has_stairs, "a reachable region is missing its staircase");
-        }
+        assert!(world.decorations.iter().all(|d| !world.terrain.is_edge_art(d.tile)));
+        assert!(world.terrain.unreached_regions().is_empty(), "seed 11: every plateau has a ramp");
     }
 
     #[test]

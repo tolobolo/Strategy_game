@@ -13,6 +13,7 @@ pub mod map;
 pub mod shop;
 pub mod terrain;
 pub mod world;
+pub mod worldgen;
 
 use bevy::prelude::*;
 
@@ -30,7 +31,7 @@ use crate::units::{HERO_SLOTS, PlayerArmy, Team, UnitKind};
 use buildings::BuildingKind;
 use economy::{INCOME_INTERVAL_SECS, TOWER_INCOME};
 use interact::{Touch, Touchable};
-use terrain::{TILE, Terrain, TerrainMap};
+use terrain::{RampSide, TILE, TerrainMap};
 use world::DecorationKind;
 
 const HERO_SPEED: f32 = 260.0;
@@ -38,8 +39,11 @@ const HERO_SIZE: f32 = 40.0;
 /// Unit sprites on the map are drawn at this scale, feet at `UNIT_FEET` from the entity's centre.
 pub const OVERWORLD_UNIT_SCALE: f32 = 0.5;
 pub const UNIT_FEET: Vec2 = Vec2::new(0.0, -12.0);
-/// Sheet index (0-based) of the base-ground tiles: `tilemap_color5`.
-const BASE_GROUND_SHEET: usize = 4;
+/// Sheet index (0-based) for the ground of `layer`: layer 1 (grass) uses `tilemap_color1`,
+/// layer 2 `tilemap_color2` and so on up to `tilemap_color5`.
+fn layer_sheet(layer: u8) -> usize {
+    layer.clamp(1, 5) as usize - 1
+}
 
 #[derive(Component)]
 pub struct Hero;
@@ -173,21 +177,20 @@ fn blob_cell(n: bool, e: bool, s: bool, w: bool) -> (u32, u32) {
     }
 }
 
-/// What a tile draws as, for the autotiler. Base ground and plateau are separate blobs.
+/// What a tile draws as, for the autotiler. Every plateau layer is a separate blob, so a
+/// layer-3 plateau sits as its own raised island on a layer-2 one.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Ground {
     Water,
     Grass,
-    BaseGround,
-    Mountain,
+    Plateau(u8),
 }
 
 fn ground_of(world: &WorldState, tile: IVec2) -> Option<Ground> {
-    Some(match world.terrain.get(tile)? {
-        Terrain::Water => Ground::Water,
-        Terrain::Mountain => Ground::Mountain,
-        Terrain::Grass if world.in_any_base(tile) => Ground::BaseGround,
-        Terrain::Grass => Ground::Grass,
+    Some(match world.terrain.layer(tile)? {
+        0 => Ground::Water,
+        1 => Ground::Grass,
+        layer => Ground::Plateau(layer),
     })
 }
 
@@ -199,16 +202,16 @@ fn ground_sprite(assets: &GameAssets, world: &WorldState, tile: IVec2, ground: G
     let same = |d: IVec2| ground_of(world, tile + d) == Some(ground);
     let (col, row) = blob_cell(same(IVec2::Y), same(IVec2::X), same(IVec2::NEG_Y), same(IVec2::NEG_X));
     match ground {
-        Ground::Grass => assets.tile(world.terrain.quarter(tile), col, row),
-        Ground::BaseGround => assets.tile(BASE_GROUND_SHEET, col, row),
-        Ground::Mountain => assets.tile(world.terrain.quarter(tile), col + 5, row),
+        Ground::Grass => assets.tile(layer_sheet(1), col, row),
+        Ground::Plateau(layer) => assets.tile(layer_sheet(layer), col + 5, row),
         Ground::Water => unreachable!(),
     }
 }
 
-/// Cliff face drawn on the tile below a mountain edge: left end, middle, right end or lone.
-fn cliff_col(map: &TerrainMap, mountain: IVec2) -> u32 {
-    let rock = |d: IVec2| map.get(mountain + d) == Some(Terrain::Mountain);
+/// Cliff face drawn on a cliff-foot tile: left end, middle, right end or lone, by whether the
+/// tiles beside it are cliff feet too.
+fn cliff_col(map: &TerrainMap, foot: IVec2) -> u32 {
+    let rock = |d: IVec2| map.is_cliff_foot(foot + d);
     match (rock(IVec2::NEG_X), rock(IVec2::X)) {
         (true, true) => 6,
         (false, true) => 5,
@@ -229,25 +232,36 @@ fn spawn_ground(commands: &mut Commands, assets: &GameAssets, world: &WorldState
             DespawnOnExit(GameState::Overworld),
         ));
 
-        // Grass below a mountain edge gets a cliff face, or the staircase that leads up.
-        let above = tile + IVec2::Y;
-        if terrain == Terrain::Grass && map.get(above) == Some(Terrain::Mountain) {
-            let sheet = map.quarter(above);
-            if map.is_stairs(tile) {
-                commands.spawn((
-                    assets.tile_rect(sheet, 0, 4, 1, 2),
-                    Transform::from_translation((pos + Vec2::new(0.0, TILE / 2.0)).extend(-0.5)),
-                    Pickable::IGNORE,
-                    DespawnOnExit(GameState::Overworld),
-                ));
-            } else {
-                commands.spawn((
-                    assets.tile(sheet, cliff_col(map, above), 4),
-                    Transform::from_translation(pos.extend(-0.9)),
-                    Pickable::IGNORE,
-                    DespawnOnExit(GameState::Overworld),
-                ));
-            }
+        // A land tile below a higher one is the foot of a cliff: it shows the stone face, in
+        // the sheet of the plateau above.
+        let _ = terrain;
+        if map.is_cliff_foot(tile) {
+            let sheet = layer_sheet(map.layer(tile + IVec2::Y).unwrap());
+            commands.spawn((
+                assets.tile(sheet, cliff_col(map, tile), 4),
+                Transform::from_translation(pos.extend(-0.9)),
+                Pickable::IGNORE,
+                DespawnOnExit(GameState::Overworld),
+            ));
+        }
+
+        // A ramp (`R`) sits beside the higher tile it climbs to. The ramp piece (1×2 tiles, in
+        // the higher layer's sheet) is drawn over the ramp tile and the ground tile below it,
+        // above the ground and the cliff faces: its top half level with the plateau, its rock
+        // half beside the cliff. Column 0 slopes down to the west (higher tile to the east),
+        // column 3 down to the east.
+        if let Some(side) = map.ramp_at(tile) {
+            let sheet = layer_sheet(map.layer(tile).unwrap() + 1);
+            let col = match side {
+                RampSide::Left => 0,
+                RampSide::Right => 3,
+            };
+            commands.spawn((
+                assets.tile_rect(sheet, col, 4, 1, 2),
+                Transform::from_translation((pos - Vec2::new(0.0, TILE / 2.0)).extend(-0.85)),
+                Pickable::IGNORE,
+                DespawnOnExit(GameState::Overworld),
+            ));
         }
     }
 }
@@ -685,7 +699,7 @@ fn refresh_overworld_hud(
             let unit = world.sellers[i].unit;
             format!("Idle {}: Tab = open the shop   R = hire for {}g", unit.name(), unit.price())
         }
-        None => "WASD: move.  E: your army.  M: world map.  Walk into buildings, towers and armies to use or attack them.  Red circles: bandits.  Stairs lead up to the high ground.".to_string(),
+        None => "WASD: move.  E: your army.  M: world map.  Walk into buildings, towers and armies to use or attack them.  Red circles: bandits.  Ramps at the ends of cliffs lead up.".to_string(),
     };
 
     let mut text = prompt;

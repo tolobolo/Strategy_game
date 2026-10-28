@@ -354,7 +354,7 @@ pub fn bandits_wander(
             let here = terrain.tile_of(squad.pos);
             for _ in 0..20 {
                 let candidate = here + IVec2::new(rng.random_range(-8..=8), rng.random_range(-8..=8));
-                let ok = terrain.get(candidate).is_some_and(|t| t.walkable()) && !bases.iter().any(|b| b.contains(candidate));
+                let ok = terrain.is_walkable(candidate) && !bases.iter().any(|b| b.contains(candidate));
                 if ok && let Some(path) = terrain.find_path(here, candidate) && !path.is_empty() {
                     squad.path = path;
                     break;

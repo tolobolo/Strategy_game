@@ -1,4 +1,4 @@
-//! The world map overlay (`M`): terrain, bases, towers, sellers, stairs and the hero. Roaming
+//! The world map overlay (`M`): terrain, bases, towers, sellers, ramps and the hero. Roaming
 //! armies and bandits are deliberately left out. See agents.md §1.1.
 
 use bevy::asset::RenderAssetUsages;
@@ -6,7 +6,6 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::Hero;
-use super::terrain::Terrain;
 use super::world::WorldState;
 use crate::faction::Faction;
 use crate::states::GameState;
@@ -89,7 +88,7 @@ fn legend(world: &WorldState) -> String {
         .map(|f| format!("{} = {}", color_name(*f), f.name()))
         .collect();
     format!(
-        "{}   |   black = neutral towers   grey dot = idle seller   white = stairs   bright green = you\nCastles {}/{}   Towers {}/{}",
+        "{}   |   black = neutral towers   grey dot = idle seller   white = ramps   bright green = you\nCastles {}/{}   Towers {}/{}",
         kingdoms.join("   "),
         world.castles_owned(),
         world.bases.len(),
@@ -108,11 +107,15 @@ fn color_name(faction: Faction) -> &'static str {
     }
 }
 
-fn terrain_rgb(terrain: Terrain) -> [u8; 3] {
-    match terrain {
-        Terrain::Water => [56, 115, 191],
-        Terrain::Grass => [115, 168, 89],
-        Terrain::Mountain => [140, 133, 128],
+/// Water blue, grass green, plateaus grey getting lighter with every layer.
+fn terrain_rgb(layer: u8) -> [u8; 3] {
+    match layer {
+        0 => [56, 115, 191],
+        1 => [115, 168, 89],
+        l => {
+            let lift = ((l - 2) as u8).saturating_mul(28);
+            [140u8.saturating_add(lift), 133u8.saturating_add(lift), 128u8.saturating_add(lift)]
+        }
     }
 }
 
@@ -136,11 +139,11 @@ fn render_map(world: &WorldState, hero_tile: IVec2) -> Image {
         pixels[i + 3] = 255;
     };
 
-    for (tile, terrain) in map.tiles() {
-        put(tile, terrain_rgb(terrain));
+    for (tile, _) in map.tiles() {
+        put(tile, terrain_rgb(map.layer(tile).unwrap_or(0)));
     }
-    for stairs in map.stairs() {
-        put(stairs, [240, 240, 240]);
+    for (ramp, _) in map.ramps() {
+        put(ramp, [240, 240, 240]);
     }
     for base in &world.bases {
         for tile in base.tiles() {

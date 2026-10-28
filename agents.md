@@ -35,9 +35,9 @@ The hero walks in real time (WASD / arrows) over a generated map (see 1.6). On i
 | **AI army** | Starts a fight against that army |
 | **Bandit squad** (red circle) | Walking into the circle starts a fight. Win = you take all their gold |
 
-Water blocks the hero. Mountains are plateaus one layer up, reachable only by their staircase (1.6).
+Water blocks the hero. Mountains are plateaus up to layer 5, climbed only by ramps (`R`) beside them (1.6).
 
-**World map**: `M` opens a full-screen map (and closes it). It shows terrain, stairs, every base in
+**World map**: `M` opens a full-screen map (and closes it). It shows terrain, ramps, every base in
 its owner's colour with the castle marked, towers in their holder's colour, idle sellers and the
 hero. **Roaming armies and bandits are not shown**, so scouting still means walking there. The map is
 rendered from `WorldState` when opened (`overworld/map.rs`).
@@ -110,9 +110,9 @@ animation) the hero cannot enter it**; the HUD says who is taking it. They also 
 castles or the hero.
 
 AI armies and bandits **walk by the same rules as the hero**: A* (the `pathfinding` crate) over
-`TerrainMap::can_step`, so they go around water and reach a plateau only by its staircase. An army
+`TerrainMap::can_step`, so they go around water and climb a plateau only by its ramps. An army
 picks the nearest tower **by walking distance**; a tower nobody can reach (island, plateau without
-stairs) is skipped and stays as it is. After a capture an army with **fewer than 5 units** walks
+ramps) is skipped and stays as it is. After a capture an army with **fewer than 5 units** walks
 back to its castle ("returning home"), rests 60 s ("resting... Ns") and sets out again with a fresh
 army; the garrison is untouched.
 
@@ -123,40 +123,115 @@ about 1 s). This also plays when you come back from winning a tower or castle fi
 
 ### 1.6 World generation, layers and tiles
 
-The map is 64×48 tiles of 64 px, built from seeded noise (`overworld/terrain.rs`,
-`overworld/world.rs`). The seed is printed in the log at start-up; `WORLD_SEED=123 cargo run`
-reproduces a map.
+The map is 64×48 tiles of 64 px. It is **built as text first** (`overworld/worldgen.rs`): every
+stage is a grid of letters, one per tile, so you can print it, tweak the constants at the top of
+that file and look again in seconds, without starting the game.
 
 ```
-NOISE LAYER 1 (elevation) ---> low = Water | mid = Grass | high = Mountain (plateau)
-NOISE LAYER 2 (moisture)  ---> denser trees where it is high
-NOISE LAYER 3 (features)  ---> towers and idle sellers sit on the peaks of this layer
+cargo run -- map 11            prints the three stages of seed 11 and a stats line
+cargo run -- map 11 --save     also writes assets/seeds/11.txt
+WORLD_SEED=11 cargo run        plays that file if it exists, otherwise builds the same map in memory
 ```
 
-**Layers.** Every tile has an elevation layer: **water 0, grass 1, mountain 2**. The hero carries a
-`Layer` too (shown in the HUD) and it follows the tile under them. Moving between layers is only
-possible on a **staircase**: a grass tile right below a mountain edge. Every mountain region gets
-one staircase on its south side (regions with no grass to the south stay unreachable). Water can
-never be entered. AI armies and bandits ignore layers (simplification).
+Letters: `W` water (layer 0), `G` grass (1), `M` mountain before layering, `2` `3` `4` `5` plateau
+layers, `R` a ramp. A seed file is 48 lines of 64 letters, top row first, optionally with `#`
+comment lines; you can edit it by hand, ramps included. `cargo run -- map <seed>` prints every
+stage, the last one with its `R`s, and `--save` writes that one as the seed file.
+
+```
+1. RAW       patches of 6×5 tiles (one more than a base, so a base always fits in a flat patch),
+             walked row by row from a random corner. Water grows along the walk: base chance 18 %,
+             every water patch adds 45 % to the next patch in its row and 60 % to the patch above
+             it in the next row; after 5 in a row (or a 100 % chance) a 2-patch breather, then the
+             chance recovers over 3 patches; never more than 30 % of the patches; the start corner
+             is never water. Mountains: a few seeds (2 % next to water, 8 % elsewhere, far less once
+             two clusters exist) grow into clusters of 6-12 patches by taking random grass patches
+             on their rim; there is always at least one. Then water is balanced to 30 % ± 3 % of
+             the water + grass tiles (a 70 / 30 split, mountains not counted): lake patches on a
+             shore turn to grass, or grass patches on a shore to water, one at a time at random.
+             Output: W / G / M per tile.
+2. WARP      every tile takes the letter of a spot up to 5 tiles away, shifted by smooth noise
+             (one noise cell per 7 tiles), so the straight 6×5 patch edges become wavy coasts and
+             mountain sides. The noise is smooth, so it makes no specks. Output: still W / G / M.
+3. LAYERS    the same seed-and-grow, nested: inside every mountain, the tiles at least 3 from any
+             lower tile are eligible; a random one seeds a blob that grows over random eligible
+             rim tiles until 55 % of them are taken and becomes the next layer up; again for each
+             layer above, up to layer 5. The 3-tile margin keeps every cliff exactly one step tall.
+             Output: W / G / 2 / 3 / 4 / 5.
+4. SMOOTH    (after the layers, so it sees every layer) 3 passes over the tiles in random
+             order. Pushes are **off** (`PUSH_TRIES = 0`): a push runs along the grid as a band 3
+             lanes wide (each lane 2-5 tiles), so it draws straight strips; over seeds 1-20 every
+             setting gave more straight edges than the warp alone. Turned on, a tile tries that
+             many directions per pass: grass takes water 10 %, water takes grass 4 %, a plateau
+             layer takes the layer just below it 12 %, never the reverse. Then a lone tile whose
+             four neighbours all share another layer joins them (a plateau never becomes water;
+             at 3 of 4 it would also cut every step of a curve and straighten it again). Nothing
+             may make a cliff two layers tall, let water touch layer 3 or higher, or leave a
+             terrace narrower than 2 tiles (`fits`), so a ramp always has room.
+             Output: still W / G / 2..5.
+5. RAMPS     (`TerrainMap::ensure_ramps`, run on every grid, generated or loaded) a ramp `R`
+             sits on the lower layer, directly **east or west** of the one tile it climbs to,
+             which is exactly one layer higher. In `1 2 3 / 4 5 6` with 5 higher, a ramp can be
+             on 4 or 6, never on 2. It fits only where exactly one of its east/west neighbours
+             is higher, the tile on its other side (its open side) and the tile below it are
+             open ground of its own layer, the tile above it is not higher (else it would be a
+             cliff wall) and no other ramp touches it (`ramp_fits`). The check: `R`s that do
+             not fit are dropped (with a warning); then a search from all layer-1 ground finds
+             what can be walked to, and every plateau region (same layer, joined) that cannot
+             be reached gets a ramp linking it to ground that can (up from below or down from
+             above), lowest layer first, until nothing changes. Spots beside a plateau's bottom
+             corner (a cliff under the tile it climbs to) are preferred, so the rock half of the
+             slope leans on the cliff. When no unreachable region has a spot at all, the lowest
+             one is reshaped (`reshape`) and the check goes on: a pocket (only walls and higher
+             ground around it) is filled up one layer; anything else (e.g. a mountain with grass
+             only north and south of it) is lowered one layer together with all the higher
+             ground standing on it, so cliffs stay one layer tall. Then one extra ramp per 40
+             tiles of region, 6 tiles from the others. So every plateau can always be reached;
+             over seeds 1-100 this reshapes 31 regions: 25 crumbs of 1-4 tiles the warp
+             broke off a mountain, and 6 mountains with only water and the map edge around them
+             (no shore for a ramp), which become grass islands.
+```
+
+`cargo test terrain_stats -- --ignored --nocapture` prints the stats line for twelve seeds.
+`cargo test straightness -- --ignored --nocapture` counts straight edges (5+ tiles) before and
+after smoothing on seeds 1-20 and the water : grass split on seeds 1-100.
+`cargo test terrain_100_seeds -- --ignored` checks the ramp rules on seeds 1-100 (every ramp fits,
+every plateau reachable, ramps survive the text). `SHOTS_DIR=<dir> WORLD_SEED=<seed> cargo run`
+(`src/shots.rs`) opens the game, saves an overview of the whole map and a close-up of up to 8
+ramps to `<dir>`, and quits; loop it over seeds to check the terrain by eye.
+
+**Layers.** Every tile has an elevation layer: **water 0, grass 1, plateau 2–5**. The hero's `Layer`
+follows the tile under them (shown in the HUD). The tile at the foot of a cliff shows the stone
+wall and is **solid**, like water. Moving between layers is only possible on a **ramp**, always by
+exactly one layer, between the ramp and the tile it climbs to (east–west). The ramp tile itself is
+ground on the lower layer, walked onto and off from every side: the north, the south and its open
+side (`TerrainMap::is_walkable`, `can_step`). The ramp, the tile below it and the tile
+on its open side stay clear of decorations, towers and sellers (`is_ramp_entry`).
+The hero's `Layer` is simply read from the tile under them after every step.
+
+**Why ramps, not stairs.** The tile sheet has no front staircase. Its two slope pieces (1 tile wide,
+2 tall: column 0 runs down to the left, column 3 down to the right, rows 4–5) slope east–west, so a
+ramp always climbs sideways onto a plateau; the front and back of a plateau are plain cliffs and
+plateau edge.
 
 **Tile sheets** (`assets/terrain/tileset/`, 9×6 cells of 64 px each):
 
 | What | Sheet | Cells used |
 |---|---|---|
 | Water | `water_background_color.png` | the single tile |
-| Grass | `tilemap_color1..4` by map quarter: 1 top-left, 2 top-right, 3 bottom-left, 4 bottom-right | flat blob top-left (3×3 + strips + single), picked by which 4-neighbours are grass |
-| Base ground | `tilemap_color5` | same flat blob rules, so a base is its own island |
-| Mountain | the quarter's sheet | raised blob top-right (columns 5–8), same neighbour rules |
-| Cliff face | the quarter's sheet | row 4, drawn on the grass tile below a mountain edge (left end / middle / right end / lone) |
-| Stairs | the quarter's sheet | the 1×2 ramp at column 0, rows 4–5, drawn over the edge tile and the grass tile below |
+| Grass | `tilemap_color1` (the sheet number is the layer: layer 1 → color1, layer 2 → color2, … up to color5) | flat blob top-left (3×3 + strips + single), picked by which 4-neighbours are grass |
+| Plateau (any layer) | the layer's sheet (`tilemap_color2..5` for layers 2–5) | raised blob top-right (columns 5–8); "same" = same layer, so a layer-3 top is its own island on a layer-2 terrace |
+| Cliff face | the sheet of the plateau above it | row 4, columns 5–8 (left end / middle / right end / lone), drawn on every cliff-foot tile |
+| Ramp | the sheet of the layer it climbs to | column 0 when the higher tile is east of it (slope down to the west), column 3 when it is west, rows 4–5, drawn over the ramp tile (top half, level with the plateau) and the ground tile below it (rock half, beside the cliff) |
 
-Bases are placed at random on grass only, spaced apart (14 tiles, relaxed if the map is cramped),
-and their 5×4 footprint is flattened. Towers and sellers keep 6 tiles from bases and 5 from each
-other. Bandits spawn at least 10 tiles from your base.
+Bases take four patches that are entirely grass after smoothing and clear of ramps, spaced 3 patches apart (relaxed
+if needed). Towers and sellers keep 6 tiles from bases and 5 from each other and never stand on a
+ramp or a cliff foot. Bandits spawn at least 10 tiles from your base.
 
 **Decorations** (`WorldState.decorations`, purely visual, animated where the sheet has frames):
-trees (`resources/wood/trees/tree1..4`, denser with moisture), bushes and rocks on land; water rocks
-and the rubber duck in the water. Never on bases, stairs, cliff faces or feature tiles.
+trees (`resources/wood/trees/tree1..4`, denser where a moisture noise is high), bushes and rocks on
+land; water rocks and the rubber duck in the water. Never on bases, walls, ramps, plateau edges or
+feature tiles; trees also keep a tile away from those (`is_edge_art`).
 
 ## 2. World structure – the five kingdoms
 
@@ -273,7 +348,9 @@ cleans them up automatically.
 | `src/units/mod.rs` | – | `UnitKind`, `UnitStats`, `Stack`, `Team`, `Army` |
 | `src/units/rules.rs` | – | Pure combat maths (no Bevy): `stack_damage`, `apply_damage`, `merge`, `split`. Unit tests live here |
 | `src/overworld/mod.rs` | `OverworldPlugin` | Spawns the map from `WorldState`, hero movement (water blocks), camera, HUD |
-| `src/overworld/terrain.rs` | – | `Terrain`, `TerrainMap` (layers, stairs, `can_step`, `find_path` via the `pathfinding` crate), value noise, `generate()` |
+| `src/overworld/worldgen.rs` | – | World building as text: `Grid` of letters, `raw` → `warp` → `layers` → `smooth`, stats, `to_text` / `from_text` |
+| `src/overworld/terrain.rs` | – | `TerrainMap` (layers 0–5, ramps, `can_step`, `find_path` via the `pathfinding` crate), `from_grid` / `to_grid` (with `R`), seed-file loading, `ensure_ramps` (ramp check, placement and reshaping), value noise |
+| `src/shots.rs` | – | dev tool: with `SHOTS_DIR` set, screenshots the overworld (overview + ramp close-ups) and quits |
 | `src/overworld/buildings.rs` | – | `BuildingKind` (what it sells, size, colour, sprite), base layout |
 | `src/overworld/world.rs` | – | `WorldState` (bases, towers, sellers, armies, bandits, hero pos), generation, `capture()` |
 | `src/overworld/economy.rs` | `EconomyPlugin` | `Treasuries` (gold per faction), income timer |
@@ -377,12 +454,13 @@ OnEnter(CombatPhase::Finished) show_result ; Update: wait_for_continue -> Overwo
 - **a new thing to touch** → `Touch` variant in `overworld/interact.rs`, spawn it with a `Touchable`, handle it in the systems there and in the HUD prompt.
 - **a new UI panel** → copy the shape of `overworld/shop.rs`: a resource that says whether it is open, a spawn function built from `children![..]`, marker components on the buttons and a `wire_*_buttons` system that attaches picking observers to them.
 - **a new roamer behaviour** → `overworld/armies.rs` (`ai_armies_act` state machine, `bandits_wander`, `follow_path`).
-- **movement rules** → `TerrainMap::can_step` in `overworld/terrain.rs`; the hero and `find_path` (used by all roamers) both go through it.
+- **movement rules** → `TerrainMap::can_step` in `overworld/terrain.rs` (same layer, or a ramp and the tile it climbs to); the hero and `find_path` (used by all roamers) both go through it.
 - **anything clickable in combat** → give the sprite `Pickable::default()`. Bevy 0.19 only hit-tests sprites that carry that component; labels and decorations get `Pickable::IGNORE`.
-- **tuning** → the constants at the top of `economy.rs`, `armies.rs`, `world.rs`, `terrain.rs` (water / mountain thresholds).
+- **tuning the map** → the constants at the top of `overworld/worldgen.rs`; look at the result with `cargo run -- map <seed>`, keep a map you like with `--save`.
+- **tuning the rest** → the constants at the top of `economy.rs`, `armies.rs`, `world.rs`.
 - **a new particle effect** → an `Fx` variant with its file in `assets.rs`, then `spawn_effect(.., fx, pos, z, scale, delay, replaces)` wherever it should play.
 - **a new decoration** → `DecorationKind` + `place_decorations` in `world.rs`, a `Strip` in `assets.rs`, a match arm in `spawn_decorations`.
-- **which sheet draws what** → `ground_sprite` and `blob_cell` in `overworld/mod.rs`, `BASE_GROUND_SHEET` for the base ground.
+- **which sheet draws what** → `ground_sprite` and `blob_cell` in `overworld/mod.rs`; the sheet number is the layer (`layer_sheet`).
 - **what defends something / what a win does** → `WorldState::enemy_army_for` and `WorldState::capture` in `overworld/world.rs`.
 - **real sprites** → load the sheet in `assets.rs`, replace `Sprite::from_color(..)` with `Sprite::from_atlas_image(..)` where the placeholder is built, add an animation timer system.
 
@@ -606,9 +684,10 @@ Not done yet: the world map as a UI texture instead of a generated image.
 - [ ] Heal for Monk
 - [ ] Kingdom-specific unit stats (Red heavy, Purple swarm, Yellow glass cannon)
 - [ ] Smarter enemy AI in combat (Unstack / Merge / Shield up)
-- [x] AI armies and bandits path around water and use stairs; armies retreat and refill
+- [x] AI armies and bandits path around water and use ramps; armies retreat and refill
 - [ ] AI kingdoms that attack
-- [x] Terrain tiles, cliffs, stairs and decorations from the sprite map
+- [x] Terrain tiles, cliffs, ramps and decorations from the sprite map
+- [x] Patch-based world with plateaus up to layer 5, terraces and `R` ramps checked so every plateau can be reached
 - [x] Unit sprites with idle / run / attack / guard
 - [x] Arrows and death dust
 - [x] Tower and base building sprites with the capture animation

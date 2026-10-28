@@ -32,7 +32,7 @@ impl Strip {
 
 #[derive(Resource, Default)]
 pub struct GameAssets {
-    /// `tilemap_color1..5`: four greens/greys for the four quarters of the map, 5 = base ground.
+    /// `tilemap_color1..5`: one per layer (1 = grass, 2..5 = plateaus).
     pub tilemaps: [Handle<Image>; 5],
     pub tilemap_layout: Handle<TextureAtlasLayout>,
     pub water: Handle<Image>,
