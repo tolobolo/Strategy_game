@@ -8,7 +8,7 @@ use super::interact::{Nearby, start_fight};
 use super::terrain::TerrainMap;
 use super::world::{EncounterSource, WorldState};
 use super::{Hero, OVERWORLD_UNIT_SCALE, UNIT_FEET, label};
-use crate::assets::{UnitArt, UnitVisual};
+use crate::assets::{AttackDir, UnitAnim, UnitArt, UnitVisual};
 use crate::faction::Faction;
 use crate::states::GameState;
 use crate::units::{Army, PlayerArmy, UnitKind};
@@ -471,6 +471,58 @@ pub fn refresh_army_labels(
     }
     for (marker, children) in &bandits {
         set(children, bandit_text(&world.bandits[marker.0]));
+    }
+}
+
+/// Which way a roamer at `pos` walking `path` faces: `Some(true)` = left (flipped sheet), `None`
+/// when the next step is straight up or down (keep facing).
+fn facing(pos: Vec2, path: &[IVec2], terrain: &TerrainMap) -> Option<bool> {
+    let next = terrain.world_pos(*path.first()?);
+    let dx = next.x - pos.x;
+    (dx.abs() >= 1.0).then_some(dx < 0.0)
+}
+
+/// Roamers animate what they do: run while walking, attack (looping) while taking a tower, idle
+/// while watching the capture, resting at the castle or standing with nowhere to go.
+pub fn animate_roamers(
+    world: Res<WorldState>,
+    ai: Query<(&AiArmyMarker, &Children)>,
+    bandits: Query<(&BanditMarker, &Children)>,
+    mut visuals: Query<&mut UnitVisual>,
+) {
+    let mut set = |children: &Children, anim: UnitAnim, flip: Option<bool>| {
+        for child in children.iter() {
+            if let Ok(mut visual) = visuals.get_mut(child) {
+                let flip_x = flip.unwrap_or(visual.flip_x);
+                if visual.anim != anim || visual.flip_x != flip_x {
+                    visual.play(anim, false);
+                    visual.flip_x = flip_x;
+                }
+            }
+        }
+    };
+    for (marker, children) in &ai {
+        let army = &world.armies[marker.0];
+        let moving = !army.path.is_empty();
+        match army.state {
+            AiArmyState::Walking | AiArmyState::Returning if moving => {
+                set(children, UnitAnim::Run, facing(army.pos, &army.path, &world.terrain));
+            }
+            AiArmyState::Capturing(_) => {
+                let tower = army.target.map(|t| world.terrain.world_pos(world.towers[t].tile));
+                let (dir, flip) = AttackDir::towards(army.pos, tower.unwrap_or(army.pos));
+                set(children, UnitAnim::Attack(dir), flip);
+            }
+            _ => set(children, UnitAnim::Idle, None),
+        }
+    }
+    for (marker, children) in &bandits {
+        let squad = &world.bandits[marker.0];
+        if squad.path.is_empty() {
+            set(children, UnitAnim::Idle, None);
+        } else {
+            set(children, UnitAnim::Run, facing(squad.pos, &squad.path, &world.terrain));
+        }
     }
 }
 

@@ -124,6 +124,7 @@ impl Plugin for OverworldPlugin {
                     armies::bandits_wander,
                     armies::respawn_roamers,
                     armies::refresh_army_labels,
+                    armies::animate_roamers,
                     refresh_building_visuals,
                     capture_visuals,
                     interact::trigger_fights,

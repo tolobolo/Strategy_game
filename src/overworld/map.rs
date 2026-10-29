@@ -7,8 +7,10 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::Hero;
 use super::world::WorldState;
+use crate::assets::GameAssets;
 use crate::faction::Faction;
 use crate::states::GameState;
+use crate::ui::{panel, sliced};
 
 /// Screen pixels per map tile on the overlay.
 const PIXELS_PER_TILE: u32 = 10;
@@ -23,6 +25,7 @@ pub fn toggle_world_map(
     keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
+    assets: Res<GameAssets>,
     mut open: ResMut<WorldMapOpen>,
     world: Res<WorldState>,
     hero: Single<&Transform, With<Hero>>,
@@ -63,14 +66,23 @@ pub fn toggle_world_map(
                 TextColor(Color::WHITE),
                 Pickable::IGNORE,
             ),
+            // The map lies on the wood table, like a board on a table.
             (
-                ImageNode::new(image),
+                panel(assets.ui.wood_table.clone(), sliced(84.0, 84.0, 85.0, 103.0)),
                 Node {
-                    width: Val::Px((width * PIXELS_PER_TILE) as f32),
-                    height: Val::Px((height * PIXELS_PER_TILE) as f32),
+                    padding: UiRect::new(Val::Px(40.0), Val::Px(40.0), Val::Px(38.0), Val::Px(52.0)),
                     ..default()
                 },
                 Pickable::IGNORE,
+                children![(
+                    ImageNode::new(image),
+                    Node {
+                        width: Val::Px((width * PIXELS_PER_TILE) as f32),
+                        height: Val::Px((height * PIXELS_PER_TILE) as f32),
+                        ..default()
+                    },
+                    Pickable::IGNORE,
+                )],
             ),
             (
                 Text::new(legend(&world)),

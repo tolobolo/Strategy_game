@@ -116,6 +116,11 @@ ramps) is skipped and stays as it is. After a capture an army with **fewer than 
 back to its castle ("returning home"), rests 60 s ("resting... Ns") and sets out again with a fresh
 army; the garrison is untouched.
 
+**Roamer animations** (`armies::animate_roamers`): AI armies and bandits play the **run**
+animation while walking (facing the way they go), the **attack** animation (looping, towards the
+tower) while capturing a tower, and **idle** while watching the capture, resting at the castle or
+standing with nowhere to go.
+
 **Building sprites**: towers and every base building use `buildings/<colour>_buildings/<kind>.png`
 in the holder's colour (towers start Black). A change of owner plays explosion + dust, then dust
 alone, over each building, then the sprites switch colour (`capture_visuals` in `overworld/mod.rs`,
