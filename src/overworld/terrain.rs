@@ -505,25 +505,27 @@ impl TerrainMap {
         (0..PATCH.y).flat_map(move |y| (0..PATCH.x).map(move |x| origin + IVec2::new(x, y)))
     }
 
-    pub fn all_patches(&self) -> Vec<IVec2> {
-        let count = self.patch_count();
-        (0..count.y)
-            .flat_map(|y| (0..count.x).map(move |x| IVec2::new(x, y)))
+    /// Where a base can stand: the bottom-left tiles of every patch-sized (6×5) area, at any
+    /// tile, whose tiles are all grass at layer 1 and clear of ramps.
+    pub fn flat_spots(&self) -> Vec<IVec2> {
+        let flat = |t: IVec2| {
+            self.layer(t) == Some(1) && !self.is_ramp(t) && !self.is_ramp(t + IVec2::Y) && !self.is_ramp_entry(t)
+        };
+        (0..=self.height - PATCH.y)
+            .flat_map(|y| (0..=self.width - PATCH.x).map(move |x| IVec2::new(x, y)))
+            .filter(|o| (0..PATCH.y).all(|y| (0..PATCH.x).all(|x| flat(*o + IVec2::new(x, y)))))
             .collect()
     }
 
-    /// Patches whose every tile is grass at layer 1 after smoothing and clear of ramps: where a
-    /// base can stand.
-    pub fn flat_patches(&self) -> Vec<IVec2> {
-        self.all_patches()
-            .into_iter()
-            .filter(|p| Self::patch_tiles(*p).all(|t| {
-                self.layer(t) == Some(1)
-                    && !self.is_ramp(t)
-                    && !self.is_ramp(t + IVec2::Y)
-                    && !self.is_ramp_entry(t)
-            }))
-            .collect()
+    /// How many bases fit side by side on the flat spots (greedy, no two in overlapping areas).
+    pub fn base_room(&self) -> usize {
+        let mut taken: Vec<IVec2> = Vec::new();
+        for spot in self.flat_spots() {
+            if taken.iter().all(|t| patch_gap(*t, spot) >= 1) {
+                taken.push(spot);
+            }
+        }
+        taken.len()
     }
 
     /// Centre of a tile in world coordinates. The map is centred on the origin.
@@ -640,6 +642,13 @@ pub fn load_or_generate(seed: u64, width: i32, height: i32) -> TerrainMap {
         },
         Err(_) => generate(seed, width, height),
     }
+}
+
+/// How many patches apart two patch-sized areas starting at `a` and `b` are (Chebyshev, in whole
+/// patches): 0 when they overlap.
+pub fn patch_gap(a: IVec2, b: IVec2) -> i32 {
+    let d = (a - b).abs();
+    (d.x / PATCH.x).max(d.y / PATCH.y)
 }
 
 /// The map of `grid` with its ramps checked and completed (`TerrainMap::ensure_ramps`).
@@ -853,9 +862,9 @@ mod tests {
                 );
             }
             assert!(
-                map.flat_patches().len() >= 4,
-                "only {} flat patches for bases (seed {seed})",
-                map.flat_patches().len()
+                map.base_room() >= 4,
+                "room for only {} bases (seed {seed})",
+                map.base_room()
             );
         }
     }
@@ -876,7 +885,7 @@ mod tests {
                 println!("seed {seed}: layer {layer} plateau at {tile} ({size} tiles) unreachable");
                 unreached += 1;
             }
-            assert!(map.flat_patches().len() >= 4, "seed {seed}: too few flat patches");
+            assert!(map.base_room() >= 4, "seed {seed}: room for only {} bases", map.base_room());
             assert_eq!(TerrainMap::from_grid(&map.to_grid()).to_grid(), map.to_grid());
         }
         assert_eq!(unreached, 0, "plateaus nobody can reach");
@@ -889,9 +898,9 @@ mod tests {
         for seed in 1..=12u64 {
             let map = generate(seed, 64, 48);
             println!(
-                "seed {seed:2}: {} | flat patches {} | ramps {}",
+                "seed {seed:2}: {} | room for bases {} | ramps {}",
                 map.to_grid().stats(),
-                map.flat_patches().len(),
+                map.base_room(),
                 map.ramps().count()
             );
         }

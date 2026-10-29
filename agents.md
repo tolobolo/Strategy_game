@@ -144,18 +144,23 @@ stage, the last one with its `R`s, and `--save` writes that one as the seed file
              every water patch adds 45 % to the next patch in its row and 60 % to the patch above
              it in the next row; after 5 in a row (or a 100 % chance) a 2-patch breather, then the
              chance recovers over 3 patches; never more than 30 % of the patches; the start corner
-             is never water. Mountains: a few seeds (2 % next to water, 8 % elsewhere, far less once
-             two clusters exist) grow into clusters of 6-12 patches by taking random grass patches
-             on their rim; there is always at least one. Then water is balanced to 30 % ± 3 % of
-             the water + grass tiles (a 70 / 30 split, mountains not counted): lake patches on a
-             shore turn to grass, or grass patches on a shore to water, one at a time at random.
+             is never water. Mountains: a few seeds (2 % next to water, 8 % elsewhere, ×3 once
+             the first exists, far less once two exist; never right next to a mountain, so they
+             stay apart) grow into clusters of 14-24 patches by taking random grass patches on
+             their rim (85 % of picks taken), never a patch touching another mountain; there is
+             always at least one, and a map with only one walks again until a second seeds.
+             Then water is balanced to 20 % ± 3 % of the water + grass tiles (an 80 / 20 split,
+             mountains not counted): a random shore patch of the smallest lake with a shore turns
+             to grass (ponds go first, big lakes stay whole), or a grass patch on a shore to
+             water, one at a time. Over seeds 1-100: 2.07 big mountains per map, average top
+             layer 3.8 (layer 5 on about 1 in 10), water 18-27 % of water + grass.
              Output: W / G / M per tile.
 2. WARP      every tile takes the letter of a spot up to 5 tiles away, shifted by smooth noise
              (one noise cell per 7 tiles), so the straight 6×5 patch edges become wavy coasts and
              mountain sides. The noise is smooth, so it makes no specks. Output: still W / G / M.
 3. LAYERS    the same seed-and-grow, nested: inside every mountain, the tiles at least 3 from any
              lower tile are eligible; a random one seeds a blob that grows over random eligible
-             rim tiles until 55 % of them are taken and becomes the next layer up; again for each
+             rim tiles until 80 % of them are taken and becomes the next layer up; again for each
              layer above, up to layer 5. The 3-tile margin keeps every cliff exactly one step tall.
              Output: W / G / 2 / 3 / 4 / 5.
 4. SMOOTH    (after the layers, so it sees every layer) 3 passes over the tiles in random
@@ -224,7 +229,8 @@ plateau edge.
 | Cliff face | the sheet of the plateau above it | row 4, columns 5–8 (left end / middle / right end / lone), drawn on every cliff-foot tile |
 | Ramp | the sheet of the layer it climbs to | column 0 when the higher tile is east of it (slope down to the west), column 3 when it is west, rows 4–5, drawn over the ramp tile (top half, level with the plateau) and the ground tile below it (rock half, beside the cliff) |
 
-Bases take four patches that are entirely grass after smoothing and clear of ramps, spaced 3 patches apart (relaxed
+Bases take four patch-sized (6×5) areas, at any tile, that are entirely layer-1 grass and clear of
+ramps (`flat_spots`), spaced 3 patches apart (`patch_gap`, relaxed
 if needed). Towers and sellers keep 6 tiles from bases and 5 from each other and never stand on a
 ramp or a cliff foot. Bandits spawn at least 10 tiles from your base.
 

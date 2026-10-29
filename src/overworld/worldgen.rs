@@ -32,17 +32,19 @@ pub const WATER_COOLDOWN: u32 = 2;
 pub const WATER_RECOVER: u32 = 3;
 pub const WATER_MAX_SHARE: f32 = 0.30;
 /// After the mountains: water makes up this share of the water + grass tiles...
-pub const WATER_TARGET: f32 = 0.30;
+pub const WATER_TARGET: f32 = 0.20;
 /// ...give or take this much.
 pub const WATER_TOLERANCE: f32 = 0.03;
 // --- stage 1, mountains: few seeds that grow into clusters of patches ---
 pub const MOUNTAIN_SEED_NEAR_WATER: f32 = 0.02;
 pub const MOUNTAIN_SEED: f32 = 0.08;
-/// Every seeded cluster beyond the second multiplies the seed chance by this.
+/// Once the first cluster exists, the seed chance is multiplied by this (more second mountains)...
+pub const MOUNTAIN_AFTER_FIRST: f32 = 3.0;
+/// ...and every seeded cluster beyond the second multiplies it by this.
 pub const MOUNTAIN_EXTRA_CLUSTER: f32 = 0.25;
 /// Roughness of rims: chance that a picked rim patch / tile is actually taken.
-pub const MOUNTAIN_GROWTH: f32 = 0.7;
-pub const MOUNTAIN_CLUSTER_SIZE: (usize, usize) = (6, 12);
+pub const MOUNTAIN_GROWTH: f32 = 0.85;
+pub const MOUNTAIN_CLUSTER_SIZE: (usize, usize) = (14, 24);
 // --- warp (between raw and layers): bends the straight patch edges into curves ---
 /// How far (in tiles, at most) a tile may take its letter from.
 pub const WARP_AMOUNT: f32 = 5.0;
@@ -70,7 +72,7 @@ pub const MIN_TERRACE: i32 = 2;
 /// A higher layer keeps this many tiles from any lower tile, so cliffs are one step tall.
 pub const LAYER_MARGIN: i32 = 3;
 /// Share of the eligible (deep enough) tiles that the next layer up fills.
-pub const UPPER_SHARE: f32 = 0.55;
+pub const UPPER_SHARE: f32 = 0.8;
 
 pub const WATER: u8 = b'W';
 pub const GRASS: u8 = b'G';
@@ -325,9 +327,9 @@ pub fn raw(seed: u64, width: i32, height: i32) -> Grid {
 }
 
 /// Bring water to `WATER_TARGET` (± `WATER_TOLERANCE`) of the water + grass tiles, counting the
-/// grass strips left over at the edges: too much water and a random lake patch next to grass
-/// becomes grass; too little and a random grass patch next to a lake becomes water (never the
-/// start corner). Lakes only shrink or grow at their shores, so they stay in one piece.
+/// grass strips left over at the edges: too much water and a random shore patch of the smallest
+/// lake that has a shore becomes grass (small ponds go first, the big lakes stay whole); too little and a random
+/// grass patch next to a lake becomes water (never the start corner).
 fn balance_water(patches: &mut Patches, start: IVec2, leftover_grass: usize, rng: &mut impl Rng) {
     let size = (PATCH.x * PATCH.y) as usize;
     loop {
@@ -342,15 +344,47 @@ fn balance_water(patches: &mut Patches, start: IVec2, leftover_grass: usize, rng
         } else {
             return;
         };
-        let shore: Vec<IVec2> = patches
+        let mut shore: Vec<IVec2> = patches
             .all()
             .into_iter()
             .filter(|p| *p != start && patches.get(*p) == Some(from))
             .filter(|p| patches.neighbours(*p).any(|n| patches.get(n) == Some(to)))
             .collect();
+        if from == PatchKind::Water {
+            // The smallest lake that has a shore patch.
+            let mut bodies = water_bodies(patches);
+            bodies.sort_by_key(|b| b.len());
+            if let Some(body) = bodies.into_iter().find(|b| shore.iter().any(|p| b.contains(p))) {
+                shore.retain(|p| body.contains(p));
+            }
+        }
         let Some(&p) = shore.choose(rng) else { return };
         patches.set(p, to);
     }
+}
+
+/// The lakes: 4-connected groups of water patches.
+fn water_bodies(patches: &Patches) -> Vec<Vec<IVec2>> {
+    let mut seen = HashSet::new();
+    let mut bodies = Vec::new();
+    for start in patches.all() {
+        if patches.get(start) != Some(PatchKind::Water) || !seen.insert(start) {
+            continue;
+        }
+        let mut body = vec![start];
+        let mut i = 0;
+        while i < body.len() {
+            let p = body[i];
+            i += 1;
+            for n in patches.neighbours(p).collect::<Vec<_>>() {
+                if patches.get(n) == Some(PatchKind::Water) && seen.insert(n) {
+                    body.push(n);
+                }
+            }
+        }
+        bodies.push(body);
+    }
+    bodies
 }
 
 fn roll_water(patches: &mut Patches, walk: &Walk, rng: &mut impl Rng) {
@@ -394,21 +428,7 @@ fn roll_water(patches: &mut Patches, walk: &Walk, rng: &mut impl Rng) {
 /// Seeds grow by taking random grass patches on their rim until they reach a rolled size.
 fn roll_mountains(patches: &mut Patches, walk: &Walk, rng: &mut impl Rng) {
     let mut clusters = 0usize;
-    for &patch in &walk.order {
-        if patches.get(patch) != Some(PatchKind::Grass) {
-            continue;
-        }
-        let near_water = patches.neighbours(patch).any(|n| patches.get(n) == Some(PatchKind::Water));
-        let mut seed = if near_water { MOUNTAIN_SEED_NEAR_WATER } else { MOUNTAIN_SEED };
-        if clusters >= 2 {
-            seed *= MOUNTAIN_EXTRA_CLUSTER.powi(clusters as i32 - 1);
-        }
-        if rng.random::<f32>() < seed {
-            let target = rng.random_range(MOUNTAIN_CLUSTER_SIZE.0..=MOUNTAIN_CLUSTER_SIZE.1);
-            grow_cluster(patches, patch, target, rng);
-            clusters += 1;
-        }
-    }
+    seed_mountains(patches, walk, &mut clusters, usize::MAX, rng);
     if clusters == 0 {
         // Never a map without a mountain: seed one on the grass patch farthest from water.
         let water: Vec<IVec2> = patches.all().into_iter().filter(|p| patches.get(*p) == Some(PatchKind::Water)).collect();
@@ -419,18 +439,62 @@ fn roll_mountains(patches: &mut Patches, walk: &Walk, rng: &mut impl Rng) {
             .max_by_key(|p| water.iter().map(|w| (*w - *p).abs().max_element()).min().unwrap_or(99));
         if let Some(p) = far {
             grow_cluster(patches, p, MOUNTAIN_CLUSTER_SIZE.0, rng);
+            clusters = 1;
+        }
+    }
+    if clusters == 1 {
+        // Only one: walk again (with the chance boosted by `MOUNTAIN_AFTER_FIRST`) until a
+        // second one seeds.
+        seed_mountains(patches, walk, &mut clusters, 2, rng);
+    }
+}
+
+/// One walk over the patches: every grass patch not touching a mountain may seed a cluster
+/// (less likely next to water; `MOUNTAIN_AFTER_FIRST` once one exists, `MOUNTAIN_EXTRA_CLUSTER`
+/// for every one beyond the second). Stops once there are `max` clusters.
+fn seed_mountains(patches: &mut Patches, walk: &Walk, clusters: &mut usize, max: usize, rng: &mut impl Rng) {
+    for &patch in &walk.order {
+        if *clusters >= max {
+            return;
+        }
+        if patches.get(patch) != Some(PatchKind::Grass) {
+            continue;
+        }
+        // A new cluster never starts right next to a mountain: it would only grow into it.
+        if patches.neighbours(patch).any(|n| patches.get(n) == Some(PatchKind::Mountain)) {
+            continue;
+        }
+        let near_water = patches.neighbours(patch).any(|n| patches.get(n) == Some(PatchKind::Water));
+        let mut seed = if near_water { MOUNTAIN_SEED_NEAR_WATER } else { MOUNTAIN_SEED };
+        if *clusters >= 1 {
+            seed *= MOUNTAIN_AFTER_FIRST;
+        }
+        if *clusters >= 2 {
+            seed *= MOUNTAIN_EXTRA_CLUSTER.powi(*clusters as i32 - 1);
+        }
+        if rng.random::<f32>() < seed {
+            let target = rng.random_range(MOUNTAIN_CLUSTER_SIZE.0..=MOUNTAIN_CLUSTER_SIZE.1);
+            grow_cluster(patches, patch, target, rng);
+            *clusters += 1;
         }
     }
 }
 
+/// Grow a mountain from `start` over random grass patches on its rim, never onto a patch that
+/// touches another mountain, so mountains stay apart.
 fn grow_cluster(patches: &mut Patches, start: IVec2, target: usize, rng: &mut impl Rng) {
     let mut cluster = vec![start];
     patches.set(start, PatchKind::Mountain);
     while cluster.len() < target {
+        let touches_other = |p: IVec2| {
+            patches
+                .neighbours(p)
+                .any(|n| patches.get(n) == Some(PatchKind::Mountain) && !cluster.contains(&n))
+        };
         let mut rim: Vec<IVec2> = cluster
             .iter()
             .flat_map(|c| patches.neighbours(*c).collect::<Vec<_>>())
-            .filter(|n| patches.get(*n) == Some(PatchKind::Grass))
+            .filter(|n| patches.get(*n) == Some(PatchKind::Grass) && !touches_other(*n))
             .collect();
         if rim.is_empty() {
             break;
@@ -744,7 +808,9 @@ mod tests {
             let water: usize = s.water_bodies.iter().sum();
             let two: usize = s.water_bodies.iter().take(2).sum();
             assert!(two as f32 >= 0.55 * water as f32, "water is scattered: {:?} (seed {seed})", s.water_bodies);
-            assert!((1..=4).contains(&s.mountains.len()), "mountains {:?} (seed {seed})", s.mountains);
+            // Real mountains; crumbs the warp breaks off are flattened by the ramp check.
+            let big = s.mountains.iter().filter(|n| **n >= 30).count();
+            assert!((1..=4).contains(&big), "mountains {:?} (seed {seed})", s.mountains);
             assert!(s.mountains[0] >= 40, "largest mountain only {} tiles (seed {seed})", s.mountains[0]);
         }
     }

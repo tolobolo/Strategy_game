@@ -301,11 +301,11 @@ fn chebyshev(a: IVec2, b: IVec2) -> i32 {
     (a - b).abs().max_element()
 }
 
-/// One base per kingdom, each in its own flat grass patch (checked after smoothing), spaced apart
-/// in patches and relaxed if the map is cramped.
+/// One base per kingdom, each on its own flat patch-sized area of grass (`flat_spots`, at any
+/// tile), spaced apart in patches (`patch_gap`) and relaxed if the map is cramped.
 fn place_bases(terrain: &mut TerrainMap, rng: &mut impl Rng) -> Vec<Base> {
     let count = terrain.patch_count();
-    let mut free: Vec<IVec2> = terrain.flat_patches();
+    let mut free: Vec<IVec2> = terrain.flat_spots();
     free.shuffle(rng);
     let mut chosen: Vec<IVec2> = Vec::new();
     let mut min_dist = BASE_MIN_PATCH_DISTANCE;
@@ -313,17 +313,17 @@ fn place_bases(terrain: &mut TerrainMap, rng: &mut impl Rng) -> Vec<Base> {
         let next = free
             .iter()
             .copied()
-            .find(|p| !chosen.contains(p) && chosen.iter().all(|c| chebyshev(*c, *p) >= min_dist));
+            .find(|p| chosen.iter().all(|c| terrain::patch_gap(*c, *p) >= min_dist));
         match next {
             Some(p) => chosen.push(p),
             None if min_dist > 1 => min_dist -= 1,
             None => {
-                // Not enough grass patches at all: take any patch and flatten it.
+                // Not enough flat grass at all: take any free patch and flatten it.
                 let any = (0..count.y)
-                    .flat_map(|y| (0..count.x).map(move |x| IVec2::new(x, y)))
-                    .find(|p| !chosen.contains(p))
+                    .flat_map(|y| (0..count.x).map(move |x| TerrainMap::patch_origin(IVec2::new(x, y))))
+                    .find(|o| chosen.iter().all(|c| terrain::patch_gap(*c, *o) >= 1))
                     .unwrap_or(IVec2::ZERO);
-                for tile in TerrainMap::patch_tiles(any) {
+                for tile in TerrainMap::patch_tiles(any / terrain::PATCH) {
                     terrain.set(tile, Terrain::Grass);
                 }
                 chosen.push(any);
@@ -334,8 +334,7 @@ fn place_bases(terrain: &mut TerrainMap, rng: &mut impl Rng) -> Vec<Base> {
     Faction::KINGDOMS
         .into_iter()
         .zip(chosen)
-        .map(|(faction, patch)| {
-            let origin = TerrainMap::patch_origin(patch);
+        .map(|(faction, origin)| {
             let base = Base { home: faction, owner: faction, prev_owner: None, origin, garrison: starting_garrison(faction) };
             for tile in base.tiles() {
                 terrain.set(tile, Terrain::Grass);

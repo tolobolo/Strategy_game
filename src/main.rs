@@ -79,7 +79,7 @@ fn map_mode() -> bool {
     println!("== layered ==\n{}", layered.to_text());
     println!("== smoothed ==\n{}", smoothed.to_text());
     println!("== ramps (R) ==\n{}", with_ramps.to_text());
-    println!("stats: {} | ramps {} | flat patches {}", smoothed.stats(), map.ramps().count(), map.flat_patches().len());
+    println!("stats: {} | ramps {} | room for bases {}", smoothed.stats(), map.ramps().count(), map.base_room());
     for (layer, tile, size) in map.unreached_regions() {
         println!("unreachable: layer {layer} plateau at {tile} ({size} tiles), no room for a ramp");
     }
