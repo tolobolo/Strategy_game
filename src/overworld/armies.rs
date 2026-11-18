@@ -6,12 +6,13 @@ use rand::Rng;
 
 use super::interact::{Nearby, start_fight};
 use super::terrain::TerrainMap;
-use super::world::{EncounterSource, WorldState};
+use super::world::{EncounterSource, Tower, WorldState};
+use super::{ai, autoresolve};
 use super::{Hero, OVERWORLD_UNIT_SCALE, UNIT_FEET, label};
 use crate::assets::{AttackDir, UnitAnim, UnitArt, UnitVisual};
 use crate::faction::Faction;
 use crate::states::GameState;
-use crate::units::{Army, PlayerArmy, UnitKind};
+use crate::units::{Army, CASTLE_SLOTS, PlayerArmy, UnitKind};
 
 pub const AI_ARMIES_PER_KINGDOM: usize = 2;
 /// An AI army stands at a tower this long before it falls...
@@ -19,7 +20,12 @@ pub const TOWER_CAPTURE_SECS: f32 = 10.0;
 /// ...then waits for the capture animation before walking on.
 pub const TOWER_LEAVE_SECS: f32 = 1.5;
 pub const AI_ARMY_SPEED: f32 = 80.0;
+/// A destroyed AI army comes back (drawn from its castle garrison) after this long.
 pub const AI_RESPAWN_SECS: f32 = 60.0;
+/// An army that came home rests this long before drawing a new army from the garrison.
+pub const AI_REST_SECS: f32 = 20.0;
+/// An AI army skips towers whose guard is stronger than this × its own strength.
+pub const AI_ATTACK_RATIO: f32 = 0.8;
 /// An army with fewer units than this goes home after a capture, rests `AI_RESPAWN_SECS` and
 /// comes back with a fresh army.
 pub const AI_RETREAT_BELOW: u32 = 5;
@@ -44,7 +50,7 @@ pub enum AiArmyState {
     Leaving(f32),
     /// Too few units left: walking back to its castle.
     Returning,
-    /// At the castle; seconds until it has a fresh army.
+    /// At the castle; seconds until it tries to draw a new army from the garrison.
     Resting(f32),
 }
 
@@ -193,6 +199,10 @@ pub fn spawn_bandit_entity(
 }
 
 fn army_text(faction: Faction, army: &Army, state: AiArmyState) -> String {
+    // Home with its units in the castle: waiting for enough troops for a new army.
+    if army.is_empty() {
+        return format!("{} army\ngathering troops...", faction.name());
+    }
     let doing = match state {
         AiArmyState::Walking => String::new(),
         AiArmyState::Capturing(left) => format!("\ncapturing... {}s", left.ceil() as u32),
@@ -225,13 +235,48 @@ fn follow_path(pos: &mut Vec2, path: &mut Vec<IVec2>, terrain: &TerrainMap, spee
     }
 }
 
-/// AI armies path (A*, same rules as the hero: no water, layers only via stairs) to the nearest
-/// reachable tower they do not own, stand at it for `TOWER_CAPTURE_SECS`, take it (leaving
-/// 10–30 % of their units behind as the garrison), wait for the capture animation and walk on.
-/// With fewer than `AI_RETREAT_BELOW` units they go home, rest and come back fresh. They never fight.
+/// The tower an AI army of `army` strength at `here` should take next, and the path there: among
+/// the towers not owned by `faction` that it can walk to, skip any whose guard is stronger than
+/// `AI_ATTACK_RATIO` × its own, and pick the lowest walking distance × (1 + guard / own).
+pub fn choose_target(
+    faction: Faction,
+    army: &Army,
+    here: IVec2,
+    towers: &[Tower],
+    terrain: &TerrainMap,
+) -> Option<(usize, Vec<IVec2>)> {
+    let own = autoresolve::strength(army).max(1.0);
+    towers
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.owner != faction)
+        .filter(|(_, t)| autoresolve::strength(&t.garrison) <= AI_ATTACK_RATIO * own)
+        .filter_map(|(i, t)| terrain.find_path(here, t.tile).map(|p| (i, p)))
+        .map(|(i, p)| {
+            let score = (p.len() as f32 + 1.0) * (1.0 + autoresolve::strength(&towers[i].garrison) / own);
+            (score, i, p)
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, i, p)| (i, p))
+}
+
+/// Put an army's units back into its castle garrison (as many as fit).
+fn join_garrison(garrison: &mut Army, army: &mut Army) {
+    for stack in std::mem::replace(army, Army::empty(army.faction)).stacks {
+        let room = CASTLE_SLOTS.saturating_sub(garrison.slots());
+        garrison.add(stack.kind, stack.count.min(room));
+    }
+}
+
+/// AI armies path (A*, same rules as the hero) to a tower picked by `choose_target`, stand at it
+/// for `TOWER_CAPTURE_SECS`, fight its guard by auto-resolve, and on a win take it (leaving 10–30 %
+/// of their units behind as the new guard), wait for the capture animation and walk on. With fewer
+/// than `AI_RETREAT_BELOW` units they go home, join the garrison, rest and set out again with an
+/// army drawn from the garrison. Armies of different kingdoms that meet fight by auto-resolve.
 pub fn ai_armies_act(
     time: Res<Time>,
     mut world: ResMut<WorldState>,
+    mut nearby: ResMut<Nearby>,
     mut roamers: Query<(&AiArmyMarker, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
@@ -240,19 +285,37 @@ pub fn ai_armies_act(
 
     for army in armies.iter_mut().filter(|a| a.alive) {
         let here = terrain.tile_of(army.pos);
-        let home_tile = bases.iter().find(|b| b.home == army.faction).map(|b| b.spawn_tile());
-        // Standing at a tower: count down, take it, then watch the animation before leaving.
+        let home = bases.iter().position(|b| b.home == army.faction && b.owner == army.faction);
+        let home_tile = home.map(|h| bases[h].spawn_tile());
+        // Standing at a tower: count down, fight for it, then watch the animation before leaving.
         match army.state {
             AiArmyState::Capturing(left) => {
                 let left = left - dt;
                 if left > 0.0 {
                     army.state = AiArmyState::Capturing(left);
                 } else if let Some(t) = army.target {
-                    let share = rng.random_range(TOWER_TAKE_LOSS.0..=TOWER_TAKE_LOSS.1);
-                    let left_behind = army.army.split_off_fraction(share);
-                    towers[t].change_owner(army.faction, left_behind);
+                    let tower = &mut towers[t];
+                    let defender = tower.owner;
+                    if defender == army.faction {
+                        army.target = None;
+                        army.state = AiArmyState::Walking;
+                        continue;
+                    }
+                    if autoresolve::resolve(&mut army.army, &mut tower.garrison, &mut rng) {
+                        let share = rng.random_range(TOWER_TAKE_LOSS.0..=TOWER_TAKE_LOSS.1);
+                        let left_behind = army.army.split_off_fraction(share);
+                        tower.change_owner(army.faction, left_behind);
+                        army.state = AiArmyState::Leaving(TOWER_LEAVE_SECS);
+                        if defender.is_player() {
+                            nearby.say_for(format!("The {} army took your tower!", army.faction.name()), 4.0);
+                        }
+                    } else {
+                        if defender.is_player() {
+                            nearby.say_for(format!("Your tower held against the {} army.", army.faction.name()), 4.0);
+                        }
+                        army.state = AiArmyState::Walking;
+                    }
                     army.target = None;
-                    army.state = AiArmyState::Leaving(TOWER_LEAVE_SECS);
                     if army.army.is_empty() {
                         army.alive = false;
                         army.respawn_in = AI_RESPAWN_SECS;
@@ -275,7 +338,10 @@ pub fn ai_armies_act(
             }
             AiArmyState::Returning => {
                 if follow_path(&mut army.pos, &mut army.path, terrain, AI_ARMY_SPEED, dt) {
-                    army.state = AiArmyState::Resting(AI_RESPAWN_SECS);
+                    if let Some(h) = home {
+                        join_garrison(&mut bases[h].garrison, &mut army.army);
+                    }
+                    army.state = AiArmyState::Resting(AI_REST_SECS);
                 }
                 continue;
             }
@@ -283,27 +349,24 @@ pub fn ai_armies_act(
                 let left = left - dt;
                 if left > 0.0 {
                     army.state = AiArmyState::Resting(left);
-                } else {
-                    army.army = random_ai_army(army.faction, &mut rng);
+                } else if let Some(fresh) = home.and_then(|h| ai::draw_army(&mut bases[h].garrison)) {
+                    army.army = fresh;
                     army.target = None;
                     army.path.clear();
                     army.state = AiArmyState::Walking;
+                } else {
+                    // Not enough troops at home yet: look again in a moment.
+                    army.state = AiArmyState::Resting(ai::AI_THINK_SECS);
                 }
                 continue;
             }
             AiArmyState::Walking => {}
         }
 
-        // Pick the nearest tower by walking distance; towers nobody can reach are skipped.
+        // Pick a tower: near and weak first; towers nobody can reach or that are too strong are skipped.
         let target_still_valid = army.target.is_some_and(|t| towers[t].owner != army.faction);
         if !target_still_valid {
-            let best = towers
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| t.owner != army.faction)
-                .filter_map(|(i, t)| terrain.find_path(here, t.tile).map(|p| (i, p)))
-                .min_by_key(|(_, p)| p.len());
-            match best {
+            match choose_target(army.faction, &army.army, here, towers, terrain) {
                 Some((i, path)) => {
                     army.target = Some(i);
                     army.path = path;
@@ -311,7 +374,7 @@ pub fn ai_armies_act(
                 None => {
                     army.target = None;
                     army.path.clear();
-                    continue; // nothing reachable: stand where we are
+                    continue; // nothing worth taking: stand where we are
                 }
             }
         }
@@ -329,6 +392,31 @@ pub fn ai_armies_act(
         }
         if follow_path(&mut army.pos, &mut army.path, terrain, AI_ARMY_SPEED, dt) {
             army.state = AiArmyState::Capturing(TOWER_CAPTURE_SECS);
+        }
+    }
+
+    // Armies of different kingdoms that meet fight it out.
+    for i in 0..armies.len() {
+        for j in i + 1..armies.len() {
+            let (a, b) = armies.split_at_mut(j);
+            let (a, b) = (&mut a[i], &mut b[0]);
+            let meet = a.alive
+                && b.alive
+                && a.faction != b.faction
+                && !a.army.is_empty()
+                && !b.army.is_empty()
+                && a.pos.distance(b.pos) <= TOUCH_DISTANCE;
+            if !meet {
+                continue;
+            }
+            let a_won = autoresolve::resolve(&mut a.army, &mut b.army, &mut rng);
+            for (army, lost) in [(a, !a_won), (b, a_won)] {
+                if lost || army.army.is_empty() {
+                    army.alive = false;
+                    army.respawn_in = AI_RESPAWN_SECS;
+                    army.target = None;
+                }
+            }
         }
     }
 
@@ -407,21 +495,25 @@ pub fn respawn_roamers(
             world.armies[i].respawn_in -= dt;
             continue;
         }
-        // Only kingdoms that still hold their own castle raise new armies.
-        let Some(base) = world.base_of(army.faction).filter(|b| b.owner == army.faction) else {
+        // Only kingdoms that still hold their own castle raise new armies. The new one is drawn
+        // from the garrison; without enough troops it waits at the castle until there are.
+        let faction = army.faction;
+        let Some(b) = world.bases.iter().position(|b| b.home == faction && b.owner == faction) else {
             world.armies[i].respawn_in = f32::INFINITY;
             continue;
         };
-        let home = world.terrain.world_pos(base.spawn_tile());
-        let fresh = random_ai_army(army.faction, &mut rng);
+        let home = world.terrain.world_pos(world.bases[b].spawn_tile());
+        let fresh = ai::draw_army(&mut world.bases[b].garrison);
         let army = &mut world.armies[i];
         army.alive = true;
         army.respawn_in = 0.0;
         army.pos = home;
-        army.army = fresh;
         army.target = None;
         army.path.clear();
-        army.state = AiArmyState::Walking;
+        (army.army, army.state) = match fresh {
+            Some(fresh) => (fresh, AiArmyState::Walking),
+            None => (Army::empty(faction), AiArmyState::Resting(ai::AI_THINK_SECS)),
+        };
         spawn_ai_army_entity(&mut commands, &mut art, army, i);
     }
 
@@ -550,5 +642,80 @@ pub fn roamer_encounters(
         .map(|(i, _)| EncounterSource::AiArmy(i));
     if let Some(source) = bandit.or(army) {
         start_fight(&mut commands, &mut next_state, &mut nearby, &player_army, &world, source);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::overworld::economy::Treasuries;
+
+    /// Run the AI (buying + armies) for `minutes` of game time at 10 ticks a second.
+    fn simulate(seed: u64, minutes: u32) -> (WorldState, Treasuries) {
+        let mut app = App::new();
+        app.insert_resource(WorldState::generate(seed))
+            .insert_resource(Nearby::default())
+            .insert_resource(Treasuries::default())
+            .insert_resource(Time::<()>::default())
+            .add_systems(Update, (ai::ai_kingdoms_buy, ai_armies_act).chain());
+        for _ in 0..minutes * 600 {
+            app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(100));
+            app.update();
+        }
+        let world = app.world_mut().remove_resource::<WorldState>().unwrap();
+        let treasuries = app.world_mut().remove_resource::<Treasuries>().unwrap();
+        (world, treasuries)
+    }
+
+    #[test]
+    fn targets_are_near_weak_and_never_too_strong() {
+        let world = WorldState::generate(3);
+        let army = &world.armies[0];
+        let here = world.terrain.tile_of(army.pos);
+        if let Some((t, path)) = choose_target(army.faction, &army.army, here, &world.towers, &world.terrain) {
+            assert_ne!(world.towers[t].owner, army.faction);
+            assert!(autoresolve::strength(&world.towers[t].garrison) <= AI_ATTACK_RATIO * autoresolve::strength(&army.army));
+            assert_eq!(*path.last().unwrap(), world.towers[t].tile);
+        }
+        let weak = Army::new(army.faction, &[(UnitKind::Pawn, 1)]);
+        assert!(choose_target(army.faction, &weak, here, &world.towers, &world.terrain).is_none(), "one pawn attacks nothing");
+    }
+
+    /// Ten minutes of AI on a few seeds: kingdoms spend gold and towers change hands.
+    #[test]
+    fn kingdoms_spend_gold_and_take_towers() {
+        let (mut taken, mut spent) = (0, 0);
+        for seed in [1u64, 5, 9] {
+            let (world, treasuries) = simulate(seed, 10);
+            taken += world.towers.iter().filter(|t| t.owner != Faction::Black).count();
+            spent += Faction::KINGDOMS
+                .into_iter()
+                .filter(|f| !f.is_player())
+                .filter(|f| treasuries.gold(*f) < crate::overworld::economy::KINGDOM_STARTING_GOLD)
+                .count();
+        }
+        assert!(taken > 0, "no tower was taken in 30 simulated minutes");
+        assert!(spent > 0, "no kingdom spent gold");
+    }
+
+    /// Tuning aid: `cargo test sim_report -- --ignored --nocapture` prints tower owners (with guard
+    /// size), armies in the field, castle garrisons and gold after 5, 10 and 20 minutes of AI on
+    /// seeds 1-5. Destroyed armies do not come back here (respawning needs the art), so the
+    /// "armies out" count is lower than in the game.
+    #[test]
+    #[ignore]
+    fn sim_report() {
+        for seed in 1..=5u64 {
+            for minutes in [5u32, 10, 20] {
+                let (world, tr) = simulate(seed, minutes);
+                let owners: Vec<String> = world.towers.iter().map(|t| format!("{}:{}", &t.owner.name()[..2], t.garrison.slots())).collect();
+                let alive = world.armies.iter().filter(|a| a.alive && !a.army.is_empty()).count();
+                let garr: Vec<u32> = world.bases.iter().map(|b| b.garrison.slots()).collect();
+                let gold: Vec<u32> = Faction::KINGDOMS.iter().map(|f| tr.gold(*f)).collect();
+                println!("seed {seed} {minutes:2}min: towers {:?} | armies out {alive}/6 | garrisons {:?} | gold {:?}", owners, garr, gold);
+            }
+        }
     }
 }

@@ -3,8 +3,10 @@
 //! The map lives in `WorldState` (a resource) so it survives trips into combat. Every time the
 //! overworld state is entered, `spawn_overworld` rebuilds the entities from it.
 
+pub mod ai;
 pub mod armies;
 pub mod army_panel;
+pub mod autoresolve;
 pub mod buildings;
 pub mod castle_panel;
 pub mod economy;
@@ -27,7 +29,7 @@ use crate::assets::{
 use crate::faction::Faction;
 use crate::states::GameState;
 use crate::ui::{army_stat, big_ribbon, gold_stat};
-use crate::units::{HERO_SLOTS, PlayerArmy, Team, UnitKind};
+use crate::units::{HERO_SLOTS, PlayerArmy, TOWER_SLOTS, Team, UnitKind};
 use buildings::BuildingKind;
 use economy::{INCOME_INTERVAL_SECS, TOWER_INCOME};
 use interact::{Touch, Touchable};
@@ -120,11 +122,15 @@ impl Plugin for OverworldPlugin {
                     interact::tick_messages,
                     interact::castle_transfer,
                     interact::buy_units,
-                    armies::ai_armies_act,
-                    armies::bandits_wander,
-                    armies::respawn_roamers,
-                    armies::refresh_army_labels,
-                    armies::animate_roamers,
+                    (
+                        ai::ai_kingdoms_buy,
+                        armies::ai_armies_act,
+                        armies::bandits_wander,
+                        armies::respawn_roamers,
+                        armies::refresh_army_labels,
+                        armies::animate_roamers,
+                    )
+                        .chain(),
                     refresh_building_visuals,
                     capture_visuals,
                     interact::trigger_fights,
@@ -689,9 +695,11 @@ fn refresh_overworld_hud(
         Some(Touch::Shop { base, kind }) => {
             format!("{} of the {}. Take their castle to use it.", kind.name(), world.bases[base].owner.name())
         }
-        Some(Touch::Tower(i)) if world.towers[i].owner.is_player() => {
-            format!("Your tower: +{TOWER_INCOME} gold every {INCOME_INTERVAL_SECS:.0} s")
-        }
+        Some(Touch::Tower(i)) if world.towers[i].owner.is_player() => format!(
+            "YOUR TOWER  guard {}/{TOWER_SLOTS}: {}   +{TOWER_INCOME} gold every {INCOME_INTERVAL_SECS:.0} s\nTab: open the tower   1 W  2 A  3 L  4 M  5 P: take one   Shift+key: store one   hold Ctrl: all",
+            world.towers[i].garrison.slots(),
+            world.towers[i].garrison.summary()
+        ),
         Some(Touch::Tower(i)) => match world.tower_being_taken_by(i) {
             Some(taker) => format!("Tower of the {}: the {} are taking it right now, you cannot get in.", world.towers[i].owner.name(), taker.name()),
             None => format!("Tower of the {}. Touching it attacks!", world.towers[i].owner.name()),

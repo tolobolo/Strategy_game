@@ -112,7 +112,7 @@ fn spawn_panel(
         "No troops.\n\nTake units from your castle (Tab there)\nor hire them at a shop or an idle seller.".to_string()
     } else {
         format!(
-            "{}  x{}\n\nHP     {}\nDEF    {}\nATK    {}-{}\nSPD    {}\nRANGE  {}-{}",
+            "{}  x{}\n\nHP     {}\nDEF    {}\nATK    {}-{}\nSPD    {}\nRANGE  {}-{}{}",
             selected.name(),
             army.0.count_of(selected),
             s.health,
@@ -121,7 +121,8 @@ fn spawn_panel(
             s.damage.1,
             s.speed,
             s.range.0,
-            s.range.1
+            s.range.1,
+            super::shop::ability_lines(selected)
         )
     };
     let ink = TextColor(Color::srgb(0.22, 0.16, 0.10));

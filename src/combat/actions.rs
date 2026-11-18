@@ -18,8 +18,6 @@ use crate::units::{ShieldUp, Stack, Team};
 
 /// Defence lost by a target that has an enemy on its far side (agents.md §3.2).
 const FLANK_PENALTY: i32 = -1;
-/// Defence gained from Shield up until the stack's next turn.
-const SHIELD_BONUS: u32 = 3;
 /// No action ever locks the battle longer than this.
 pub const MAX_ACTION_SECS: f32 = 2.0;
 /// A move costs this for its first step...
@@ -58,7 +56,7 @@ pub enum CombatAction {
     Unstack,
     /// Merge with an adjacent friendly stack of the same kind (1 AP).
     Merge(Entity),
-    /// +3 defence until this stack's next turn (1 AP).
+    /// ShieldBlock ability: +bonus defence until this stack's next turn (1 AP).
     ShieldUp,
     EndTurn,
 }
@@ -461,14 +459,16 @@ pub fn resolve_actions(
             }
 
             CombatAction::ShieldUp => {
-                commands.entity(me).insert(ShieldUp(SHIELD_BONUS));
+                // ShieldBlock is an ability: only kinds that list it in units.ron can use it.
+                let Some(bonus) = my_stack.kind.shield_bonus() else {
+                    log.push(format!("{}: cannot raise shields.", who(&my_stack)));
+                    continue;
+                };
+                commands.entity(me).insert(ShieldUp(bonus));
                 play(&children, &mut visuals, me, UnitAnim::Guard, false);
                 ap.0 -= 1;
                 acted = true;
-                log.push(format!(
-                    "{} raises shields: +{SHIELD_BONUS} defence until its next turn.",
-                    who(&my_stack)
-                ));
+                log.push(format!("{} raises shields: +{bonus} defence until its next turn.", who(&my_stack)));
             }
 
             CombatAction::EndTurn => {

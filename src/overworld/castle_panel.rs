@@ -1,24 +1,24 @@
-//! The castle panel: `Tab` next to your own castle. A small ribbon carries the five unit
+//! The castle panel: `Tab` next to your own castle or tower. A small ribbon carries the five unit
 //! avatars; the selected kind shows its blue avatar, the others their black one. TAKE and STORE
 //! move that kind between the garrison and the hero. See agents.md §6.3.
 
 use bevy::prelude::*;
 
-use super::interact::{Nearby, Touch, transfer};
+use super::interact::{Garrison, Nearby, transfer};
 use super::world::WorldState;
 use crate::assets::{GameAssets, UnitAnim, UnitArt};
 use crate::faction::Faction;
 use crate::states::GameState;
 use crate::ui::{army_stat, avatar_index, panel, sliced};
-use crate::units::{CASTLE_SLOTS, HERO_SLOTS, PlayerArmy, UnitKind};
+use crate::units::{HERO_SLOTS, PlayerArmy, UnitKind};
 
-/// Which base the panel is open for and which unit kind is selected. `None` = closed.
+/// Which castle or tower the panel is open for and which unit kind is selected. `None` = closed.
 #[derive(Resource, Default)]
 pub struct OpenCastle(pub Option<CastleTarget>);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CastleTarget {
-    pub base: usize,
+    pub place: Garrison,
     pub selected: UnitKind,
 }
 
@@ -62,7 +62,8 @@ fn avatar_path(faction: Faction, unit: UnitKind) -> String {
     format!("ui_elements/ui_elements/human_avatars/avatars_{:02}.png", avatar_index(faction, unit))
 }
 
-/// Tab next to your own castle opens the panel and closes it; Esc, the X and walking away close it.
+/// Tab next to your own castle or tower opens the panel and closes it; Esc, the X and walking away
+/// close it.
 /// Number keys still work and also move the selection.
 #[allow(clippy::too_many_arguments)]
 pub fn toggle_castle(
@@ -78,7 +79,7 @@ pub fn toggle_castle(
 ) {
     if let Some(target) = open.0 {
         let close = keys.any_just_pressed([KeyCode::Tab, KeyCode::Escape])
-            || nearby.touch != Some(Touch::Castle(target.base))
+            || nearby.touch != Some(target.place.touch())
             || roots.is_empty();
         if close {
             open.0 = None;
@@ -99,10 +100,9 @@ pub fn toggle_castle(
             commands.entity(root).despawn();
         }
         if keys.just_pressed(KeyCode::Tab)
-            && let Some(Touch::Castle(base)) = nearby.touch
-            && world.bases[base].owner.is_player()
+            && let Some(place) = Garrison::touched(nearby.touch, &world)
         {
-            let target = CastleTarget { base, selected: UnitKind::Warrior };
+            let target = CastleTarget { place, selected: UnitKind::Warrior };
             open.0 = Some(target);
             spawn_panel(&mut commands, &assets, &server, &mut art, target);
         }
@@ -328,7 +328,7 @@ fn on_move_click(
     let Some(target) = open.0 else { return };
     let store = stores.contains(click.entity);
     let all = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
-    transfer(&mut world, &mut army, &mut nearby, target.base, target.selected, store, all);
+    transfer(&mut world, &mut army, &mut nearby, target.place, target.selected, store, all);
 }
 
 fn on_close_click(click: On<Pointer<Click>>, mut open: ResMut<OpenCastle>) {
@@ -360,7 +360,7 @@ pub fn refresh_castle_panel(
         *shown = None;
         return;
     };
-    let base = &world.bases[target.base];
+    let garrison = target.place.army(&world);
     let kind = target.selected;
 
     if *shown != Some(kind) {
@@ -379,17 +379,25 @@ pub fn refresh_castle_panel(
 
     let s = kind.stats();
     let stats = format!(
-        "{}\n\nIn the castle  {}\nWith you       {}\n\nHP {}   DEF {}   ATK {}-{}   SPD {}\n\n1-5 or click an avatar: select\nTAKE / STORE one; Ctrl+click: all",
+        "{}\n\nIn the {:<8}{}\nWith you       {}\n\nHP {}   DEF {}   ATK {}-{}   SPD {}{}\n\n1-5 or click an avatar: select\nTAKE / STORE one; Ctrl+click: all",
         kind.name(),
-        base.garrison.count_of(kind),
+        match target.place {
+            Garrison::Castle(_) => "castle",
+            Garrison::Tower(_) => "tower",
+        },
+        garrison.count_of(kind),
         army.0.count_of(kind),
         s.health,
         s.defence,
         s.damage.0,
         s.damage.1,
-        s.speed
+        s.speed,
+        kind.abilities_text()
     );
-    let title = format!("Castle of the {}   garrison {}/{}", base.owner.name(), base.garrison.slots(), CASTLE_SLOTS);
+    let title = match target.place {
+        Garrison::Castle(i) => format!("Castle of the {}   garrison {}/{}", world.bases[i].owner.name(), garrison.slots(), target.place.cap()),
+        Garrison::Tower(_) => format!("Your tower   guard {}/{}", garrison.slots(), target.place.cap()),
+    };
     let slots = format!("{}/{}", army.0.slots(), HERO_SLOTS);
     let message = nearby.message.clone().unwrap_or_default();
     for (i, value) in [title, stats, slots, message].into_iter().enumerate() {

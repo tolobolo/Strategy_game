@@ -78,7 +78,8 @@ guard. Whoever holds a tower gets its income.
 | Winning a fight | You take **half** of the loser's gold (bandits: all of their purse, 10–40) |
 | Losing a fight | **Half of your gold** goes to the faction that beat you |
 
-AI kingdoms and Black earn income too, so their loot grows while you wait.
+AI kingdoms and Black earn income too. AI kingdoms spend theirs on units for their castle, which
+feed their armies (§1.5); Black only hoards it, so its loot grows while you wait.
 
 ### 1.4 Armies and slots
 
@@ -102,19 +103,45 @@ AI kingdoms and Black earn income too, so their loot grows while you wait.
 - **Undefended** castles and towers are taken just by touching them.
 - **Goal**: hold all four castles. A banner tells you when the land is united.
 
-**AI kingdoms** each have 2 roaming armies. They walk to the nearest tower they do not own, **stand at
-it for 10 seconds** (the label counts down), and take it **without a fight**. Taking a tower costs the
-army a random **10–30 %** of its units, which stay behind as that tower's guard. The capture animation
-plays, then the army walks on to the next tower. **While an army is taking a tower (countdown and
-animation) the hero cannot enter it**; the HUD says who is taking it. They also take towers you own. AI armies never attack
-castles or the hero.
+**Fights without the player (auto-resolve, `overworld/autoresolve.rs`).** Every fight the hero is
+not in is settled by a formula, never on the combat grid. **Strength** of an army = Σ per stack
+count × average damage × (health + defence). Each side's strength is multiplied by a random
+**0.8–1.2**; the higher wins. The loser is wiped out; the winner loses **0.6 × loser / winner** of
+its units (spread over its stacks), so a close fight is costly and a lopsided one nearly free. An
+empty side always loses.
+
+**AI kingdoms** each have 2 roaming armies. They walk to a tower they do not own, **stand at it for
+10 seconds** (the label counts down), then **fight its guard by auto-resolve** (an undefended tower is
+simply taken). Win: the tower is theirs and a random **10–30 %** of the army stays behind as its new
+guard; the capture animation plays and the army walks on. Lose: the army is destroyed (back in 60 s)
+and the tower keeps what is left of its guard. **While an army is taking a tower (countdown and
+animation) the hero cannot enter it**; the HUD says who is taking it. **Your towers are targets too**:
+the HUD tells you when one falls or holds. AI armies do not attack castles yet (sieges come later).
+
+- **Choosing a tower**: among the towers it does not own and can walk to, an army skips any whose
+  guard is stronger than **0.8 ×** its own strength, and picks the lowest score = walking distance
+  in tiles × (1 + guard strength / own strength): near and weak first.
+- **Armies meeting**: two AI armies of different kingdoms within touching distance (40 px) fight by
+  auto-resolve; the loser is destroyed and comes back from its castle after 60 s.
+- **Spending gold** (`overworld/ai.rs`): every **5 s** each AI kingdom that holds its own castle buys
+  up to 3 units into its castle garrison, at the same prices as the player, while it can afford one
+  and the castle has room (30): Warrior 4, Archer 3, Lancer 2, Monk 1 (weights; Pawns are not bought).
+- **Raising armies**: the first two armies start ready (random 4–8 Warriors, 2–5 Archers, 1–3
+  Lancers). After that an army is **drawn from the castle garrison**: everything above a reserve of
+  **10** units, at most 20, and only once at least **8** are available; until then the army waits at
+  the castle ("gathering troops"). A destroyed army comes back this way after 60 s.
+
+**You can garrison your towers**: at a tower you own, `Tab` opens the same panel as the castle
+(§6.3) and the number keys work like at the castle (take one, Shift stores one, Ctrl all), up to
+**10** units (`TOWER_SLOTS`). The guard defends it against AI
+armies (auto-resolve) and against nobody else yet.
 
 AI armies and bandits **walk by the same rules as the hero**: A* (the `pathfinding` crate) over
 `TerrainMap::can_step`, so they go around water and climb a plateau only by its ramps. An army
 picks the nearest tower **by walking distance**; a tower nobody can reach (island, plateau without
 ramps) is skipped and stays as it is. After a capture an army with **fewer than 5 units** walks
-back to its castle ("returning home"), rests 60 s ("resting... Ns") and sets out again with a fresh
-army; the garrison is untouched.
+back to its castle ("returning home"), its survivors join the castle garrison, it rests 20 s
+("resting... Ns") and then sets out with a new army drawn from the garrison (see above).
 
 **Roamer animations** (`armies::animate_roamers`): AI armies and bandits play the **run**
 animation while walking (facing the way they go), the **attack** animation (looping, towards the
@@ -264,7 +291,12 @@ uses the unit stats in §3.1.
 
 Slot limits (20 on the hero, 30 in a castle) are in §1.4.
 
-A **stack** is a group of units of the **same kind** standing on one tile. Every unit kind has:
+**All unit numbers live in `assets/units.ron`** — the one place to balance units. Edit it and
+restart the game (no recompile). It is loaded and checked at startup (`units/stats.rs`): a missing
+kind, damage/range min above max or a RON typo stops the game with a clear error.
+
+A **stack** is a group of units of the **same kind** standing on one tile. Every unit kind has these
+base stats (required in the file) and the base actions Move, Strike, Unstack and Merge:
 
 | Stat | Meaning |
 |---|---|
@@ -273,7 +305,14 @@ A **stack** is a group of units of the **same kind** standing on one tile. Every
 | `speed` | Movement range in tiles |
 | `damage` | A `min..=max` range, rolled by every other unit in the stack (see 3.2) |
 | `range` | Strike range in tiles as `min..=max`, like damage. `1..=1` = melee: the 8 surrounding tiles. Archers have `2..=4`: they cannot hit anything closer than 2 tiles |
-| actions | The actions the kind can perform (see 3.3) |
+| `price` | Gold to hire one unit (§1.3) |
+
+**Abilities** are optional extras that only the kinds listing them have (`abilities: [...]` in the
+file, `units/ability.rs` in code):
+
+| Ability | Who has it | Does |
+|---|---|---|
+| `ShieldBlock(bonus)` | Warrior (bonus 3) | Unlocks the **Shield up** action (3.3) |
 
 Unit kinds available in the pack: **Warrior, Archer, Lancer, Monk, Pawn**.
 
@@ -321,7 +360,7 @@ Every stack gets **3 action points (AP)** per turn and can mix actions freely.
 | **Strike** | 1 AP | Attack an enemy stack using the rules in 3.2 (melee: one of the 8 surrounding tiles; ranged: distance within its `min..=max` range). The attack animation is chosen from the direction attacker → target: the signs of the difference pick the Lancer's up / up-right / right / down-right / down sheet, a negative horizontal difference flips the sprite. Kinds with only one attack sheet are tilted towards the target instead (45° for diagonals, 90° straight up or down) |
 | **Unstack** | 1 AP | Split into two equal halves (odd count: the extra unit stays). The new half goes to the first free tile starting to the right and going clockwise. The original keeps the wounded lead unit and the remaining AP; the new half is inserted in the turn order **right before** the original, so from the next round it acts first |
 | **Merge** | 1 AP | Merge with an orthogonally adjacent friendly stack of the **same kind**. The counts are added into the active stack, the other stack disappears from the grid and the turn order. Its wounded lead unit is healed (a stack only tracks one wounded unit) |
-| **Shield up** | 1 AP | +3 defence until this stack's next turn starts |
+| **Shield up** | 1 AP | **ShieldBlock ability only** (Warrior): +bonus defence (3) until this stack's next turn starts. Other kinds get "cannot raise shields" and keep the AP; the SHIELD button is hidden for them |
 
 Only stacks of the same unit kind can be merged. A stack that has nothing to split (1 unit) or no free
 tile around it cannot unstack.
@@ -356,7 +395,13 @@ cleans them up automatically.
 | `src/main.rs` | – | App setup, window, camera, asset root |
 | `src/states.rs` | `StatesPlugin` | `GameState`, `CombatPhase` |
 | `src/faction.rs` | – | `Faction` enum: colour, name, sprite folder |
-| `src/units/mod.rs` | – | `UnitKind`, `UnitStats`, `Stack`, `Team`, `Army` |
+| `assets/units.ron` | – | Balance sheet: base stats, price and abilities of every unit kind |
+| `src/units/mod.rs` | – | Re-exports, slot limits |
+| `src/units/kind.rs` | – | `UnitKind`: `stats()`, `price()`, `abilities()`, `shield_bonus()` look up the balance sheet |
+| `src/units/stats.rs` | – | `UnitStats`, `UnitBook`: loads and validates `assets/units.ron` |
+| `src/units/ability.rs` | – | `Ability` enum (`ShieldBlock`) |
+| `src/units/stack.rs` | – | `Stack`, `ShieldUp`, `Team` |
+| `src/units/army.rs` | – | `Army`, `PlayerArmy` |
 | `src/units/rules.rs` | – | Pure combat maths (no Bevy): `stack_damage`, `apply_damage`, `merge`, `split`. Unit tests live here |
 | `src/overworld/mod.rs` | `OverworldPlugin` | Spawns the map from `WorldState`, hero movement (water blocks), camera, HUD |
 | `src/overworld/worldgen.rs` | – | World building as text: `Grid` of letters, `raw` → `warp` → `layers` → `smooth`, stats, `to_text` / `from_text` |
@@ -458,7 +503,8 @@ OnEnter(CombatPhase::Finished) show_result ; Update: wait_for_continue -> Overwo
 
 ### 4.7 Where do I add…
 
-- **a new unit kind** → `UnitKind` + `UnitKind::stats()` in `units/mod.rs`, then a row in the sprite map.
+- **a new unit kind** → a variant in `UnitKind` (`units/kind.rs`) + `ALL`, an entry in `assets/units.ron`, then a row in the sprite map.
+- **a new ability** → a variant in `Ability` (`units/ability.rs`), list it on kinds in `assets/units.ron`, then use it in `combat/actions.rs`.
 - **a new action** → variant in `CombatAction`, a match arm in `resolve_actions`, a key or click in `player_input`.
 - **a new kingdom** → `Faction` variant + colour + sprite folder in `faction.rs`, and add it to `Faction::KINGDOMS`.
 - **a new building** → `BuildingKind` in `overworld/buildings.rs` (what it sells, size) and a slot in `base_layout()`.
@@ -635,7 +681,9 @@ wood and paper cover the whole node including the padding.
 
 ### 6.3 Castle panel (`overworld/castle_panel.rs`)
 
-`Tab` next to your own castle. Same wood table; under the title a **small blue ribbon**
+`Tab` next to your own castle **or tower** (the same panel for both: the title reads "Castle of the
+… garrison n/30" or "Your tower guard n/10", the paper "In the castle" or "In the tower"; which one
+it is, is an `interact::Garrison`). Same wood table; under the title a **small blue ribbon**
 (`ribbons/small_ribbons.png`, the forked-end row of each colour stitched into
 `generated/ribbon_small_<colour>_3.png`, 188×60, caps 62 px) carries the **five avatars** in the
 same order as the number keys: Warrior, Archer, Lancer, Monk, Pawn. The **selected kind shows its blue avatar, the others their
@@ -696,7 +744,11 @@ Not done yet: the world map as a UI texture instead of a generated image.
 - [ ] Kingdom-specific unit stats (Red heavy, Purple swarm, Yellow glass cannon)
 - [ ] Smarter enemy AI in combat (Unstack / Merge / Shield up)
 - [x] AI armies and bandits path around water and use ramps; armies retreat and refill
-- [ ] AI kingdoms that attack
+- [x] AI kingdoms that buy units, raise armies from their garrison, fight each other and attack towers (yours too); auto-resolve for fights without the player; tower garrisons
+- [ ] Sieges: an AI army besieges a castle for 45 s (banner + countdown); reach it in time and your castle garrison fights with you, otherwise auto-resolve; losing your last castle loses the game
+- [ ] Resources: gold mines, trees (wood), sheep (meat) on the map; Tab on one to assign worker Pawns from the castle, who walk there, work and carry the load home
+- [ ] Crafting in the House (new UI, besides selling Pawns): recipes of wood + meat + gold for upgrades (bigger castle storage, bigger hero army)
+- [ ] Bandits hunt workers; AI kingdoms send workers too
 - [x] Terrain tiles, cliffs, ramps and decorations from the sprite map
 - [x] Patch-based world with plateaus up to layer 5, terraces and `R` ramps checked so every plateau can be reached
 - [x] Unit sprites with idle / run / attack / guard

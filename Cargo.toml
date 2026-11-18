@@ -7,6 +7,8 @@ edition = "2024"
 bevy = "0.19"
 rand = "0.9"
 pathfinding = "4"
+serde = { version = "1.0.229", features = ["derive"] }
+ron = "0.12.3"
 
 # Faster iteration: light optimisation for our code, full for dependencies.
 [profile.dev]

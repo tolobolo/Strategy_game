@@ -8,7 +8,7 @@ use super::economy::Treasuries;
 use super::world::{EncounterSource, PendingEncounter, WorldState};
 use crate::faction::Faction;
 use crate::states::GameState;
-use crate::units::{CASTLE_SLOTS, HERO_SLOTS, PlayerArmy, UnitKind};
+use crate::units::{Army, CASTLE_SLOTS, HERO_SLOTS, PlayerArmy, TOWER_SLOTS, UnitKind};
 
 const MESSAGE_SECS: f32 = 2.5;
 
@@ -96,17 +96,62 @@ pub fn tick_messages(time: Res<Time>, mut nearby: ResMut<Nearby>) {
 
 const TRANSFER_KEYS: [KeyCode; 5] = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
 
-/// At your own castle: number key takes one unit of that kind, Shift stores one, Ctrl moves all.
+/// A garrison of yours the hero can move units in and out of: a castle or a tower.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Garrison {
+    Castle(usize),
+    Tower(usize),
+}
+
+impl Garrison {
+    /// The garrison of yours the hero is touching, if any.
+    pub fn touched(touch: Option<Touch>, world: &WorldState) -> Option<Garrison> {
+        match touch? {
+            Touch::Castle(i) if world.bases[i].owner.is_player() => Some(Garrison::Castle(i)),
+            Touch::Tower(i) if world.towers[i].owner.is_player() => Some(Garrison::Tower(i)),
+            _ => None,
+        }
+    }
+
+    pub fn touch(self) -> Touch {
+        match self {
+            Garrison::Castle(i) => Touch::Castle(i),
+            Garrison::Tower(i) => Touch::Tower(i),
+        }
+    }
+
+    /// How many units it holds at most.
+    pub fn cap(self) -> u32 {
+        match self {
+            Garrison::Castle(_) => CASTLE_SLOTS,
+            Garrison::Tower(_) => TOWER_SLOTS,
+        }
+    }
+
+    pub fn army(self, world: &WorldState) -> &Army {
+        match self {
+            Garrison::Castle(i) => &world.bases[i].garrison,
+            Garrison::Tower(i) => &world.towers[i].garrison,
+        }
+    }
+
+    fn army_mut(self, world: &mut WorldState) -> &mut Army {
+        match self {
+            Garrison::Castle(i) => &mut world.bases[i].garrison,
+            Garrison::Tower(i) => &mut world.towers[i].garrison,
+        }
+    }
+}
+
+/// At your own castle or tower: number key takes one unit of that kind, Shift stores one, Ctrl
+/// moves all.
 pub fn castle_transfer(
     keys: Res<ButtonInput<KeyCode>>,
     mut nearby: ResMut<Nearby>,
     mut world: ResMut<WorldState>,
     mut player_army: ResMut<PlayerArmy>,
 ) {
-    let Some(Touch::Castle(base)) = nearby.touch else { return };
-    if !world.bases[base].owner.is_player() {
-        return;
-    }
+    let Some(place) = Garrison::touched(nearby.touch, &world) else { return };
     let Some(kind) = TRANSFER_KEYS
         .iter()
         .zip(UnitKind::ALL)
@@ -117,26 +162,27 @@ pub fn castle_transfer(
     };
     let store = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let all = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
-    transfer(&mut world, &mut player_army, &mut nearby, base, kind, store, all);
+    transfer(&mut world, &mut player_army, &mut nearby, place, kind, store, all);
 }
 
-/// Move units of `kind` between the hero and the garrison of `base`: one, or all with `all`.
-/// `store` moves hero -> castle, otherwise castle -> hero. Used by the number keys and the
-/// castle panel's buttons.
+/// Move units of `kind` between the hero and the garrison of `place`: one, or all with `all`.
+/// `store` moves hero -> garrison, otherwise garrison -> hero. Used by the number keys and the
+/// garrison panel's buttons.
 pub fn transfer(
     world: &mut WorldState,
     player_army: &mut PlayerArmy,
     nearby: &mut Nearby,
-    base: usize,
+    place: Garrison,
     kind: UnitKind,
     store: bool,
     all: bool,
 ) {
-    let garrison = &mut world.bases[base].garrison;
+    let cap = place.cap();
+    let garrison = place.army_mut(world);
     let hero = &mut player_army.0;
 
     let (from, to, cap, verb) = if store {
-        (hero, garrison, CASTLE_SLOTS, "stored")
+        (hero, garrison, cap, "stored")
     } else {
         (garrison, hero, HERO_SLOTS, "took")
     };

@@ -21,6 +21,8 @@ fn main() {
     if map_mode() {
         return;
     }
+    // Load assets/units.ron now so a broken balance sheet fails at startup, not mid-game.
+    units::stats::book();
     App::new()
         .add_plugins(
             DefaultPlugins

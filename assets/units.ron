@@ -1,0 +1,24 @@
+// Balance sheet for every unit kind. Edit and restart the game; no recompile needed.
+//
+// Base stats (every unit must have all of them):
+//   health   hit points of one unit
+//   defence  damage each unit absorbs before losing health
+//   speed    movement range in tiles
+//   damage   (min, max), rolled by every other unit in the stack
+//   range    (min, max) strike distance in tiles. (1, 1) = melee
+//   price    gold to hire one unit
+//
+// Abilities (optional, only the units that list them have them):
+//   ShieldBlock(bonus: N)  1 AP: +N defence until the stack's next turn
+(
+    units: {
+        Warrior: (
+            health: 10, defence: 3, speed: 3, damage: (3, 5), range: (1, 1), price: 15,
+            abilities: [ShieldBlock(bonus: 3)],
+        ),
+        Archer: (health: 6, defence: 1, speed: 3, damage: (2, 4), range: (2, 4), price: 10),
+        Lancer: (health: 12, defence: 4, speed: 2, damage: (4, 6), range: (1, 1), price: 25),
+        Monk: (health: 7, defence: 2, speed: 3, damage: (1, 2), range: (1, 1), price: 20),
+        Pawn: (health: 4, defence: 0, speed: 4, damage: (1, 3), range: (1, 1), price: 5),
+    },
+)

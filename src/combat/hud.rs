@@ -405,10 +405,11 @@ pub fn refresh_turn_strip(
 
 fn describe(stack: &Stack, team: Team, faction: Faction, shield: Option<&ShieldUp>) -> String {
     let s = stack.stats();
-    let shield = shield.map_or(String::new(), |sh| format!("   SHIELD +{}", sh.0));
+    let shield = shield.map_or(String::new(), |sh| format!("   SHIELD UP +{}", sh.0));
+    let abilities = stack.kind.abilities_text();
     let range = if stack.is_ranged() { format!("   RANGE {}-{}", s.range.0, s.range.1) } else { String::new() };
     format!(
-        "{} {} x{}  ({})\nHP {}/{}   DEF {}   SPD {}   ATK {}-{} ({} roll){}{}",
+        "{} {} x{}  ({})\nHP {}/{}   DEF {}   SPD {}   ATK {}-{} ({} roll){}{}{}",
         team.label(),
         stack.kind.name(),
         stack.count,
@@ -421,6 +422,7 @@ fn describe(stack: &Stack, team: Team, faction: Faction, shield: Option<&ShieldU
         s.damage.1,
         stack.rolling_units(),
         range,
+        abilities,
         shield
     )
 }
@@ -590,4 +592,17 @@ pub fn show_result(mut commands: Commands, assets: Res<GameAssets>, result: Res<
         DespawnOnExit(GameState::Combat),
         children![finish_banner(&assets, ribbon, title, text, color)],
     ));
+}
+
+/// Ability buttons only show when the active stack has that ability (SHIELD needs ShieldBlock).
+pub fn show_ability_buttons(active: Query<&Stack, With<ActiveStack>>, mut buttons: Query<(&ActionButton, &mut Node)>) {
+    let shield = active.single().ok().and_then(|stack| stack.kind.shield_bonus()).is_some();
+    for (button, mut node) in &mut buttons {
+        if *button == ActionButton::ShieldUp {
+            let display = if shield { Display::Flex } else { Display::None };
+            if node.display != display {
+                node.display = display;
+            }
+        }
+    }
 }

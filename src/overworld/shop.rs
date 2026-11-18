@@ -123,7 +123,7 @@ fn spawn_panel(commands: &mut Commands, assets: &GameAssets, server: &AssetServe
     let strip = art.strip(target.faction, target.unit, UnitAnim::Attack(AttackDir::Right));
     let s = target.unit.stats();
     let stats = format!(
-        "{}\n\nHP     {}\nDEF    {}\nATK    {}-{}\nSPD    {}\nRANGE  {}-{}\n\nPrice  {} gold\nTakes 1 of your {} slots",
+        "{}\n\nHP     {}\nDEF    {}\nATK    {}-{}\nSPD    {}\nRANGE  {}-{}{}\n\nPrice  {} gold\nTakes 1 of your {} slots",
         target.unit.name(),
         s.health,
         s.defence,
@@ -132,6 +132,7 @@ fn spawn_panel(commands: &mut Commands, assets: &GameAssets, server: &AssetServe
         s.speed,
         s.range.0,
         s.range.1,
+        ability_lines(target.unit),
         target.unit.price(),
         HERO_SLOTS
     );
@@ -335,4 +336,9 @@ pub fn animate_ui_images(time: Res<Time>, mut query: Query<(&mut UiAnimated, &mu
             atlas.index = (atlas.index + 1) % anim.frames.max(1);
         }
     }
+}
+
+/// One `\nShield +3` style line per ability; empty for kinds without abilities.
+pub fn ability_lines(kind: crate::units::UnitKind) -> String {
+    kind.abilities().iter().map(|a| format!("\n{}", a.label())).collect()
 }

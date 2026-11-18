@@ -41,6 +41,7 @@ impl Plugin for CombatPlugin {
                     hud::refresh_stack_labels,
                     hud::refresh_turn_strip,
                     hud::refresh_panel,
+                    hud::show_ability_buttons,
                     hud::follow_active_marker,
                     hud::highlight_reachable_tiles,
                     actions::tween_stack_moves,
