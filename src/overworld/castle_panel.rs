@@ -1,10 +1,12 @@
 //! The castle panel: `Tab` next to your own castle or tower. A small ribbon carries the five unit
 //! avatars; the selected kind shows its blue avatar, the others their black one. TAKE and STORE
-//! move that kind between the garrison and the hero. See agents.md §6.3.
+//! move that kind between the garrison and the hero. While an AI army besieges the place a JOIN
+//! row shows: JOIN (or `J`) fights it with your army and the garrison. See agents.md §6.3.
 
 use bevy::prelude::*;
 
-use super::interact::{Garrison, Nearby, transfer};
+use super::armies::AiArmyState;
+use super::interact::{Garrison, Nearby, join_siege, transfer};
 use super::world::WorldState;
 use crate::assets::{GameAssets, UnitAnim, UnitArt};
 use crate::faction::Faction;
@@ -42,6 +44,13 @@ pub struct CastleStats;
 pub struct CastleArmy;
 #[derive(Component)]
 pub struct CastleMessage;
+/// The row with the siege warning and the JOIN button; only shown while the place is besieged.
+#[derive(Component)]
+pub struct JoinRow;
+#[derive(Component)]
+pub struct JoinButton;
+#[derive(Component)]
+pub struct SiegeText;
 /// The animated preview of the selected kind.
 #[derive(Component)]
 pub struct CastlePreview;
@@ -265,6 +274,51 @@ fn spawn_panel(commands: &mut Commands, assets: &GameAssets, server: &AssetServe
                             });
                         }
                     });
+
+                // Siege: who attacks, how long is left, and JOIN. Hidden unless besieged.
+                table
+                    .spawn((
+                        JoinRow,
+                        BackgroundColor(Color::srgba(0.45, 0.05, 0.05, 0.75)),
+                        Node {
+                            display: Display::None,
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(16.0),
+                            padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+                            ..default()
+                        },
+                        Pickable::IGNORE,
+                    ))
+                    .with_children(|row| {
+                        row.spawn((
+                            SiegeText,
+                            Text::new(""),
+                            TextFont { font_size: FontSize::Px(18.0), ..default() },
+                            TextColor(Color::WHITE),
+                            Node { flex_grow: 1.0, ..default() },
+                            Pickable::IGNORE,
+                        ));
+                        row.spawn((
+                            JoinButton,
+                            panel(assets.ui.button_regular.clone(), button_regular_mode()),
+                            Node {
+                                width: Val::Px(190.0),
+                                height: Val::Px(70.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                        ))
+                        .with_children(|b| {
+                            b.spawn((
+                                Text::new("JOIN  J"),
+                                TextFont { font_size: FontSize::Px(24.0), ..default() },
+                                TextColor(Color::WHITE),
+                                Pickable::IGNORE,
+                            ));
+                        });
+                    });
             });
         });
 }
@@ -276,7 +330,11 @@ pub fn wire_castle_buttons(
     take: Query<Entity, Added<TakeButton>>,
     store: Query<Entity, Added<StoreButton>>,
     close: Query<Entity, Added<CastleClose>>,
+    join: Query<Entity, Added<JoinButton>>,
 ) {
+    for entity in &join {
+        commands.entity(entity).observe(on_press).observe(on_release).observe(on_join_click);
+    }
     for entity in &avatars {
         commands.entity(entity).observe(on_avatar_click);
     }
@@ -297,14 +355,16 @@ fn on_avatar_click(click: On<Pointer<Click>>, avatars: Query<&AvatarButton>, mut
     }
 }
 
-fn on_press(press: On<Pointer<Press>>, assets: Res<GameAssets>, mut images: Query<&mut ImageNode, Or<(With<TakeButton>, With<StoreButton>)>>) {
+type RedButton = Or<(With<TakeButton>, With<StoreButton>, With<JoinButton>)>;
+
+fn on_press(press: On<Pointer<Press>>, assets: Res<GameAssets>, mut images: Query<&mut ImageNode, RedButton>) {
     if let Ok(mut image) = images.get_mut(press.entity) {
         image.image = assets.ui.button_pressed.clone();
         image.image_mode = button_pressed_mode();
     }
 }
 
-fn on_release(release: On<Pointer<Release>>, assets: Res<GameAssets>, mut images: Query<&mut ImageNode, Or<(With<TakeButton>, With<StoreButton>)>>) {
+fn on_release(release: On<Pointer<Release>>, assets: Res<GameAssets>, mut images: Query<&mut ImageNode, RedButton>) {
     if let Ok(mut image) = images.get_mut(release.entity) {
         image.image = assets.ui.button_regular.clone();
         image.image_mode = button_regular_mode();
@@ -331,6 +391,42 @@ fn on_move_click(
     transfer(&mut world, &mut army, &mut nearby, target.place, target.selected, store, all);
 }
 
+#[allow(clippy::too_many_arguments)]
+fn on_join_click(
+    click: On<Pointer<Click>>,
+    mut commands: Commands,
+    open: Res<OpenCastle>,
+    world: Res<WorldState>,
+    army: Res<PlayerArmy>,
+    mut nearby: ResMut<Nearby>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    if click.event.button != PointerButton::Primary {
+        return;
+    }
+    if let Some(target) = open.0 {
+        join_siege(&mut commands, &mut next_state, &mut nearby, &army, &world, target.place);
+    }
+}
+
+/// `J` with the panel open at a besieged castle or tower: the same as the JOIN button.
+pub fn join_key(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut commands: Commands,
+    open: Res<OpenCastle>,
+    world: Res<WorldState>,
+    army: Res<PlayerArmy>,
+    mut nearby: ResMut<Nearby>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    if keys.just_pressed(KeyCode::KeyJ)
+        && let Some(target) = open.0
+        && world.besieger(target.place).is_some()
+    {
+        join_siege(&mut commands, &mut next_state, &mut nearby, &army, &world, target.place);
+    }
+}
+
 fn on_close_click(click: On<Pointer<Click>>, mut open: ResMut<OpenCastle>) {
     if click.event.button == PointerButton::Primary {
         open.0 = None;
@@ -353,7 +449,9 @@ pub fn refresh_castle_panel(
         Single<&mut Text, With<CastleStats>>,
         Single<&mut Text, With<CastleArmy>>,
         Single<&mut Text, With<CastleMessage>>,
+        Single<&mut Text, With<SiegeText>>,
     )>,
+    mut join_row: Single<&mut Node, With<JoinRow>>,
     mut shown: Local<Option<UnitKind>>,
 ) {
     let Some(target) = open.0 else {
@@ -400,12 +498,35 @@ pub fn refresh_castle_panel(
     };
     let slots = format!("{}/{}", army.0.slots(), HERO_SLOTS);
     let message = nearby.message.clone().unwrap_or_default();
-    for (i, value) in [title, stats, slots, message].into_iter().enumerate() {
+
+    let siege = world.besieger(target.place).map(|i| {
+        let attacker = &world.armies[i];
+        let left = match attacker.state {
+            AiArmyState::Capturing(left) => left.ceil() as u32,
+            _ => 0,
+        };
+        format!(
+            "UNDER ATTACK! The {} army ({}) attacks in {left} s.\nJOIN: fight them with your army and the {}.",
+            attacker.faction.name(),
+            attacker.army.summary(),
+            match target.place {
+                Garrison::Castle(_) => "castle garrison",
+                Garrison::Tower(_) => "tower guard",
+            }
+        )
+    });
+    let display = if siege.is_some() { Display::Flex } else { Display::None };
+    if join_row.display != display {
+        join_row.display = display;
+    }
+
+    for (i, value) in [title, stats, slots, message, siege.unwrap_or_default()].into_iter().enumerate() {
         let mut text = match i {
             0 => texts.p0().into_inner(),
             1 => texts.p1().into_inner(),
             2 => texts.p2().into_inner(),
-            _ => texts.p3().into_inner(),
+            3 => texts.p3().into_inner(),
+            _ => texts.p4().into_inner(),
         };
         if text.0 != value {
             text.0 = value;

@@ -8,7 +8,7 @@ use bevy::prelude::*;
 
 use super::grid::{BattleGrid, GridPos, in_strike_range};
 use super::hud::CombatLog;
-use super::spawn::spawn_stack;
+use super::spawn::{FromGarrison, spawn_stack};
 use super::turn::{self, ActionPoints, ActiveStack, TurnOrder};
 use crate::assets::{AttackDir, Fx, UnitAnim, UnitArt, UnitVisual, anim_duration, spawn_effect};
 use crate::faction::Faction;
@@ -268,7 +268,7 @@ pub fn resolve_actions(
     children: Query<&Children>,
     mut visuals: Query<&mut UnitVisual>,
     mut active: Query<
-        (Entity, &Team, &Faction, &mut Stack, &mut GridPos, &Transform, &mut ActionPoints),
+        (Entity, &Team, &Faction, &mut Stack, &mut GridPos, &Transform, &mut ActionPoints, Has<FromGarrison>),
         With<ActiveStack>,
     >,
     mut others: Query<
@@ -280,7 +280,7 @@ pub fn resolve_actions(
         actions.clear();
         return;
     }
-    let Ok((me, my_team, my_faction, mut my_stack, mut my_pos, my_transform, mut ap)) = active.single_mut()
+    let Ok((me, my_team, my_faction, mut my_stack, mut my_pos, my_transform, mut ap, guard)) = active.single_mut()
     else {
         actions.clear();
         return;
@@ -417,7 +417,7 @@ pub fn resolve_actions(
                 };
                 let label = who(&my_stack);
                 *my_stack = kept;
-                let new_stack = spawn_stack(&mut commands, &mut art, &grid, my_team, *my_faction, moved, free);
+                let new_stack = spawn_stack(&mut commands, &mut art, &grid, my_team, *my_faction, moved, free, guard);
                 // The new half acts right before this stack from the next round on.
                 let slot = order.current;
                 order.order.insert(slot, new_stack);

@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use super::Hero;
 use super::buildings::BuildingKind;
 use super::economy::Treasuries;
-use super::world::{EncounterSource, PendingEncounter, WorldState};
+use super::world::{Base, EncounterSource, PendingEncounter, Tower, WorldState};
 use crate::faction::Faction;
 use crate::states::GameState;
 use crate::units::{Army, CASTLE_SLOTS, HERO_SLOTS, PlayerArmy, TOWER_SLOTS, UnitKind};
@@ -63,7 +63,35 @@ pub fn start_fight(
     if enemy.is_empty() {
         return false;
     }
-    commands.insert_resource(PendingEncounter { enemy, source });
+    commands.insert_resource(PendingEncounter { enemy, source, defending: None });
+    next_state.set(GameState::Combat);
+    true
+}
+
+/// JOIN at your besieged castle or tower: you and its garrison fight the besieging AI army
+/// together, and you command every stack. Works without an army of your own. Returns true if
+/// combat was started. See agents.md §1.5.
+pub fn join_siege(
+    commands: &mut Commands,
+    next_state: &mut NextState<GameState>,
+    nearby: &mut Nearby,
+    player: &PlayerArmy,
+    world: &WorldState,
+    place: Garrison,
+) -> bool {
+    let Some(i) = world.besieger(place) else {
+        nearby.say("Nobody is attacking it right now.");
+        return false;
+    };
+    if player.0.is_empty() && place.army(world).is_empty() {
+        nearby.say("Nobody to fight with: you have no army and the garrison is empty.");
+        return false;
+    }
+    commands.insert_resource(PendingEncounter {
+        enemy: world.armies[i].army.clone(),
+        source: EncounterSource::AiArmy(i),
+        defending: Some(place),
+    });
     next_state.set(GameState::Combat);
     true
 }
@@ -96,7 +124,8 @@ pub fn tick_messages(time: Res<Time>, mut nearby: ResMut<Nearby>) {
 
 const TRANSFER_KEYS: [KeyCode; 5] = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
 
-/// A garrison of yours the hero can move units in and out of: a castle or a tower.
+/// A castle or a tower, with its garrison. The hero moves units in and out of their own ones
+/// (`touched`), and AI armies besiege them (`AiArmy::target`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Garrison {
     Castle(usize),
@@ -110,6 +139,38 @@ impl Garrison {
             Touch::Castle(i) if world.bases[i].owner.is_player() => Some(Garrison::Castle(i)),
             Touch::Tower(i) if world.towers[i].owner.is_player() => Some(Garrison::Tower(i)),
             _ => None,
+        }
+    }
+
+    /// The tile an army walks to to besiege it: the tower's tile or the castle's gate (where its
+    /// armies come out).
+    pub fn tile_in(self, towers: &[Tower], bases: &[Base]) -> IVec2 {
+        match self {
+            Garrison::Castle(i) => bases[i].spawn_tile(),
+            Garrison::Tower(i) => towers[i].tile,
+        }
+    }
+
+    pub fn owner_in(self, towers: &[Tower], bases: &[Base]) -> Faction {
+        match self {
+            Garrison::Castle(i) => bases[i].owner,
+            Garrison::Tower(i) => towers[i].owner,
+        }
+    }
+
+    pub fn tile(self, world: &WorldState) -> IVec2 {
+        self.tile_in(&world.towers, &world.bases)
+    }
+
+    pub fn owner(self, world: &WorldState) -> Faction {
+        self.owner_in(&world.towers, &world.bases)
+    }
+
+    /// "castle" or "tower", for messages.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Garrison::Castle(_) => "castle",
+            Garrison::Tower(_) => "tower",
         }
     }
 
@@ -135,7 +196,7 @@ impl Garrison {
         }
     }
 
-    fn army_mut(self, world: &mut WorldState) -> &mut Army {
+    pub fn army_mut(self, world: &mut WorldState) -> &mut Army {
         match self {
             Garrison::Castle(i) => &mut world.bases[i].garrison,
             Garrison::Tower(i) => &mut world.towers[i].garrison,

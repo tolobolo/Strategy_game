@@ -136,7 +136,7 @@ impl Plugin for OverworldPlugin {
                     interact::trigger_fights,
                     armies::roamer_encounters,
                     (map::toggle_world_map, shop::toggle_shop, shop::wire_shop_buttons, shop::refresh_shop_status, shop::animate_ui_images).chain(),
-                    (castle_panel::toggle_castle, castle_panel::wire_castle_buttons, castle_panel::refresh_castle_panel).chain(),
+                    (castle_panel::toggle_castle, castle_panel::wire_castle_buttons, castle_panel::refresh_castle_panel, castle_panel::join_key).chain(),
                     (army_panel::toggle_army, army_panel::refresh_army_panel, army_panel::wire_army_buttons, army_panel::refresh_army_slots).chain(),
                     refresh_overworld_hud,
                 )
@@ -711,7 +711,21 @@ fn refresh_overworld_hud(
         None => "WASD: move.  E: your army.  M: world map.  Walk into buildings, towers and armies to use or attack them.  Red circles: bandits.  Ramps at the ends of cliffs lead up.".to_string(),
     };
 
-    let mut text = prompt;
+    // Every siege on your castles and towers, with the time left to JOIN.
+    let mut text = String::new();
+    for army in world.armies.iter().filter(|a| a.alive) {
+        if let (armies::AiArmyState::Capturing(left), Some(place)) = (army.state, army.target)
+            && place.owner(&world).is_player()
+        {
+            text.push_str(&format!(
+                "SIEGE! The {} army attacks your {}: {} s left to get there (Tab, JOIN).\n",
+                army.faction.name(),
+                place.noun(),
+                left.ceil() as u32
+            ));
+        }
+    }
+    text.push_str(&prompt);
     if let Some(message) = &nearby.message {
         text.push('\n');
         text.push_str(message);

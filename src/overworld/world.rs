@@ -9,6 +9,7 @@ use rand::{Rng, SeedableRng};
 use super::armies::{self, AiArmy, BanditSquad};
 use super::buildings::{BASE_SIZE, BASE_SPAWN_OFFSET, BuildingKind, base_layout};
 use super::economy::Treasuries;
+use super::interact::Garrison;
 use super::terrain::{self, Noise, Terrain, TerrainMap};
 use crate::faction::Faction;
 use crate::units::{Army, UnitKind};
@@ -36,6 +37,8 @@ pub enum EncounterSource {
 pub struct PendingEncounter {
     pub enemy: Army,
     pub source: EncounterSource,
+    /// Set when you JOIN a siege: that castle's or tower's garrison fights on your side.
+    pub defending: Option<Garrison>,
 }
 
 /// A 5×4 kingdom base.
@@ -102,6 +105,16 @@ impl Tower {
 }
 
 /// An idle unit standing in the wild that hires out its own kind.
+impl Base {
+    pub fn change_owner(&mut self, new_owner: Faction, garrison: Army) {
+        if self.owner != new_owner {
+            self.prev_owner = Some(self.prev_owner.unwrap_or(self.owner));
+        }
+        self.owner = new_owner;
+        self.garrison = garrison;
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Seller {
     pub unit: UnitKind,
@@ -152,8 +165,38 @@ impl WorldState {
         use super::armies::AiArmyState;
         self.armies
             .iter()
-            .find(|a| a.alive && a.target == Some(i) && matches!(a.state, AiArmyState::Capturing(_) | AiArmyState::Leaving(_)))
+            .find(|a| {
+                a.alive
+                    && a.target == Some(Garrison::Tower(i))
+                    && matches!(a.state, AiArmyState::Capturing(_) | AiArmyState::Leaving(_))
+            })
             .map(|a| a.faction)
+    }
+
+    /// The AI army besieging `place` right now (standing at it, counting down), if any.
+    pub fn besieger(&self, place: Garrison) -> Option<usize> {
+        use super::armies::AiArmyState;
+        self.armies
+            .iter()
+            .position(|a| a.alive && a.target == Some(place) && matches!(a.state, AiArmyState::Capturing(_)))
+    }
+
+    /// You lost the siege fight you joined: the attacker keeps its `survivors`, leaves part of
+    /// them in `place` as its new garrison (like a capture by auto-resolve) and walks on.
+    pub fn siege_lost(&mut self, army: usize, place: Garrison, survivors: Vec<crate::units::Stack>) {
+        use super::armies::{AiArmyState, TOWER_LEAVE_SECS, TOWER_TAKE_LOSS};
+        let mut rng = rand::rng();
+        let attacker = &mut self.armies[army];
+        attacker.army.stacks = survivors;
+        let share = rng.random_range(TOWER_TAKE_LOSS.0..=TOWER_TAKE_LOSS.1);
+        let left_behind = attacker.army.split_off_fraction(share);
+        let faction = attacker.faction;
+        attacker.target = None;
+        attacker.state = AiArmyState::Leaving(TOWER_LEAVE_SECS);
+        match place {
+            Garrison::Castle(i) => self.bases[i].change_owner(faction, left_behind),
+            Garrison::Tower(i) => self.towers[i].change_owner(faction, left_behind),
+        }
     }
 
     pub fn generate(seed: u64) -> Self {

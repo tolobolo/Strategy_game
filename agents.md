@@ -110,17 +110,21 @@ count × average damage × (health + defence). Each side's strength is multiplie
 its units (spread over its stacks), so a close fight is costly and a lopsided one nearly free. An
 empty side always loses.
 
-**AI kingdoms** each have 2 roaming armies. They walk to a tower they do not own, **stand at it for
-10 seconds** (the label counts down), then **fight its guard by auto-resolve** (an undefended tower is
-simply taken). Win: the tower is theirs and a random **10–30 %** of the army stays behind as its new
-guard; the capture animation plays and the army walks on. Lose: the army is destroyed (back in 60 s)
-and the tower keeps what is left of its guard. **While an army is taking a tower (countdown and
-animation) the hero cannot enter it**; the HUD says who is taking it. **Your towers are targets too**:
-the HUD tells you when one falls or holds. AI armies do not attack castles yet (sieges come later).
+**AI kingdoms** each have 2 roaming armies. They walk to a **tower or castle** they do not own and
+**besiege** it: they stand at it (a tower's tile, a castle's gate = `Base::spawn_tile`) for
+**10 seconds** (`TOWER_CAPTURE_SECS`), or **45 seconds** (`SIEGE_SECS`) if it is **yours**; the
+label counts down ("besieging... Ns"). Then they **fight its garrison by auto-resolve** (an
+undefended one is simply taken). Win: the place is theirs and a random **10–30 %** of the army stays
+behind as its new garrison; the capture animation plays and the army walks on. A kingdom that loses
+its castle (and holds no other) loses its armies for good. Lose: the army is destroyed (back in 60 s)
+and the place keeps what is left of its garrison. **While an army is taking a tower (countdown and
+animation) the hero cannot attack it**; the HUD says who is taking it.
 
-- **Choosing a tower**: among the towers it does not own and can walk to, an army skips any whose
-  guard is stronger than **0.8 ×** its own strength, and picks the lowest score = walking distance
-  in tiles × (1 + guard strength / own strength): near and weak first.
+- **Choosing a target** (`armies::choose_target`): among the towers and castles it does not own
+  and can walk to, an army skips any whose garrison is stronger than **0.8 ×** its own strength, and
+  picks the lowest score = walking distance in tiles × (1 + garrison strength / own strength): near
+  and weak first. A full castle (25–30 units) is usually too strong, so castles fall mostly after
+  their owner has emptied them.
 - **Armies meeting**: two AI armies of different kingdoms within touching distance (40 px) fight by
   auto-resolve; the loser is destroyed and comes back from its castle after 60 s.
 - **Spending gold** (`overworld/ai.rs`): every **5 s** each AI kingdom that holds its own castle buys
@@ -131,10 +135,28 @@ the HUD tells you when one falls or holds. AI armies do not attack castles yet (
   **10** units, at most 20, and only once at least **8** are available; until then the army waits at
   the castle ("gathering troops"). A destroyed army comes back this way after 60 s.
 
+**Sieges of your castles and towers.** When an AI army starts besieging one of yours, a message says
+so and the HUD shows a line per siege with the seconds left ("SIEGE! … s left to get there (Tab,
+JOIN)"). Walk there (touching the besiegers does **not** start a fight while they besiege you), open
+the castle panel with `Tab` and press **JOIN** (or `J`) (§6.3). You then fight on the combat grid
+with **your army and the whole garrison together**, and you command every stack; the garrison's
+stacks are tagged **GUARD** (`combat::spawn::FromGarrison`; a GUARD stack you Unstack stays GUARD).
+The fight is already on at the walls: the **GUARD stacks start in columns 4–5 and the attackers in
+columns 7–8**, face to face in the middle, while **your own army arrives from the left edge**
+(columns 0–1) as in any battle (`SIEGE_GUARD_COLUMNS` / `SIEGE_ENEMY_COLUMNS` in `combat/spawn.rs`).
+It works **without an army of your own** (just the garrison), but not when both are empty. While
+you fight, the overworld (and the countdown) is paused.
+- **Win**: the attacker is destroyed (you loot half its kingdom's gold, as against any AI army).
+  Your survivors stay with you, GUARD survivors go back into the garrison; if merging left you with
+  more than 20 units, the extra goes into the garrison too.
+- **Lose**: your army and half your gold are lost as in any defeat, and the place falls to the
+  attacker, which keeps 10–30 % of its survivors there as the new garrison (`WorldState::siege_lost`).
+- **Not joined in time**: the countdown ends and the siege is auto-resolved like any other.
+
 **You can garrison your towers**: at a tower you own, `Tab` opens the same panel as the castle
 (§6.3) and the number keys work like at the castle (take one, Shift stores one, Ctrl all), up to
-**10** units (`TOWER_SLOTS`). The guard defends it against AI
-armies (auto-resolve) and against nobody else yet.
+**10** units (`TOWER_SLOTS`). The guard defends it against AI armies (auto-resolve, or with you if
+you JOIN the siege) and against nobody else yet.
 
 AI armies and bandits **walk by the same rules as the hero**: A* (the `pathfinding` crate) over
 `TerrainMap::can_step`, so they go around water and climb a plateau only by its ramps. An army
@@ -412,7 +434,7 @@ cleans them up automatically.
 | `src/overworld/world.rs` | – | `WorldState` (bases, towers, sellers, armies, bandits, hero pos), generation, `capture()` |
 | `src/overworld/economy.rs` | `EconomyPlugin` | `Treasuries` (gold per faction), income timer |
 | `src/overworld/interact.rs` | – | `Touch`/`Touchable`, `Nearby`, castle transfer, buying, fight triggers |
-| `src/overworld/armies.rs` | – | `AiArmy` and `BanditSquad` state, movement, tower grabbing, respawns, encounters |
+| `src/overworld/armies.rs` | – | `AiArmy` and `BanditSquad` state, movement, sieges of towers and castles, respawns, encounters |
 | `src/overworld/map.rs` | – | The `M` world map overlay, rendered as one pixel per tile from `WorldState` |
 | `src/overworld/shop.rs` | – | The `Tab` shop panel (§6.1): wood table, avatar, animated preview, stats paper, buy button |
 | `src/ui.rs` | – | Shared UI pieces (§6.2): nine-slice panels, coin / sword stats, ribbons, finish banner |
@@ -465,7 +487,7 @@ cleans them up automatically.
 | `OpenShop` | always | The shop panel's target while it is open |
 | `OpenCastle` | always | The castle panel's base and selected unit kind while it is open |
 | `OpenArmy`, `ArmyPanelShown` | always | The army page's selected kind, and what it was last built from |
-| `PendingEncounter { enemy, source }` | Overworld → Combat | The enemy army and what it defends (`EncounterSource::Base/Tower/AiArmy/Bandits`) |
+| `PendingEncounter { enemy, source, defending }` | Overworld → Combat | The enemy army, what it defends (`EncounterSource::Base/Tower/AiArmy/Bandits`), and the castle or tower whose garrison fights with you when you JOIN a siege |
 | `BattleGrid` | Combat | Grid size and tile size |
 | `TurnOrder` | Combat | Shuffled list of stack entities + current index |
 | `CombatLog` | Combat | Last few lines of what happened |
@@ -483,7 +505,7 @@ in `combat/actions.rs`). That keeps the rules in one place.
 
 Controls: click a lit tile = Move, click an enemy stack = Strike, click an own stack = Merge,
 `1` = Unstack, `3` = Shield up, `Space` = End turn. There is no way to leave a battle early.
-Overworld keys: `Tab` shop / castle panel, `E` army page, `R` quick buy, `M` map, `1`–`5` castle transfer.
+Overworld keys: `Tab` shop / castle panel, `E` army page, `R` quick buy, `M` map, `1`–`5` castle transfer, `J` join a siege (castle panel open).
 
 ### 4.6 Schedule
 
@@ -685,7 +707,9 @@ wood and paper cover the whole node including the padding.
 
 ### 6.3 Castle panel (`overworld/castle_panel.rs`)
 
-`Tab` next to your own castle **or tower** (the same panel for both: the title reads "Castle of the
+`Tab` next to your own castle **or tower** opens it. While an AI army besieges the place, a dark red
+**JOIN row** shows under the buttons: who attacks with what, the seconds left, and a **JOIN** button
+(or `J`) that starts the siege fight (§1.5, `interact::join_siege`). The panel is the same for both (the title reads "Castle of the
 … garrison n/30" or "Your tower guard n/10", the paper "In the castle" or "In the tower"; which one
 it is, is an `interact::Garrison`). Same wood table; under the title a **small blue ribbon**
 (`ribbons/small_ribbons.png`, the forked-end row of each colour stitched into
@@ -766,7 +790,8 @@ with → hand + frame; any other tile or stack → no sign.
 - [ ] Smarter enemy AI in combat (Unstack / Merge / Shield up)
 - [x] AI armies and bandits path around water and use ramps; armies retreat and refill
 - [x] AI kingdoms that buy units, raise armies from their garrison, fight each other and attack towers (yours too); auto-resolve for fights without the player; tower garrisons
-- [ ] Sieges: an AI army besieges a castle for 45 s (banner + countdown); reach it in time and your castle garrison fights with you, otherwise auto-resolve; losing your last castle loses the game
+- [x] Sieges: AI armies besiege towers and castles (45 s on yours, HUD countdown); JOIN in the castle panel to fight with the garrison, otherwise auto-resolve
+- [ ] Losing your last castle loses the game
 - [ ] Resources: gold mines, trees (wood), sheep (meat) on the map; Tab on one to assign worker Pawns from the castle, who walk there, work and carry the load home
 - [ ] Crafting in the House (new UI, besides selling Pawns): recipes of wood + meat + gold for upgrades (bigger castle storage, bigger hero army)
 - [ ] Bandits hunt workers; AI kingdoms send workers too

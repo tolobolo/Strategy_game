@@ -4,10 +4,12 @@ use bevy::prelude::*;
 
 use super::grid::BattleGrid;
 use super::hud::CombatLog;
+use super::spawn::FromGarrison;
 use crate::faction::Faction;
+use crate::overworld::world::EncounterSource;
 use crate::overworld::{Nearby, PendingEncounter, Treasuries, WorldState};
 use crate::states::{CombatPhase, GameState};
-use crate::units::{PlayerArmy, ShieldUp, Stack, Team};
+use crate::units::{HERO_SLOTS, PlayerArmy, ShieldUp, Stack, Team};
 
 pub const AP_PER_TURN: u8 = 3;
 
@@ -83,11 +85,13 @@ pub fn activate_current_stack(
 }
 
 /// Ends the battle when one side has no stacks left and writes the outcome back to the world.
-/// Units lost in battle are gone for good; survivors go back to the hero.
+/// Units lost in battle are gone for good; survivors go back to the hero, and after a siege you
+/// joined the GUARD survivors go back into the garrison (anything over the hero's 20 too). Losing
+/// a siege also loses the castle or tower to the attacker.
 #[allow(clippy::too_many_arguments)]
 pub fn check_victory(
     mut commands: Commands,
-    stacks: Query<(&Team, &Stack)>,
+    stacks: Query<(&Team, &Stack, Has<FromGarrison>)>,
     encounter: Res<PendingEncounter>,
     mut player_army: ResMut<PlayerArmy>,
     mut world: ResMut<WorldState>,
@@ -96,31 +100,53 @@ pub fn check_victory(
     mut nearby: ResMut<Nearby>,
     mut next_phase: ResMut<NextState<CombatPhase>>,
 ) {
-    let players_alive = stacks.iter().any(|(t, s)| *t == Team::Player && !s.is_dead());
-    let enemies_alive = stacks.iter().any(|(t, s)| *t == Team::Enemy && !s.is_dead());
+    let players_alive = stacks.iter().any(|(t, s, _)| *t == Team::Player && !s.is_dead());
+    let enemies_alive = stacks.iter().any(|(t, s, _)| *t == Team::Enemy && !s.is_dead());
     if players_alive && enemies_alive {
         return;
     }
+    let survivors = |team: Team, guard: bool| -> Vec<Stack> {
+        stacks
+            .iter()
+            .filter(|(t, s, g)| **t == team && !s.is_dead() && (team == Team::Enemy || *g == guard))
+            .map(|(_, s, _)| *s)
+            .collect()
+    };
 
     let result = if players_alive {
-        player_army.0.stacks = stacks
-            .iter()
-            .filter(|(t, s)| **t == Team::Player && !s.is_dead())
-            .map(|(_, s)| *s)
-            .collect();
+        player_army.0.stacks = survivors(Team::Player, false);
+        if let Some(place) = encounter.defending {
+            let garrison = place.army_mut(&mut world);
+            garrison.stacks = survivors(Team::Player, true);
+            // Guards merged into your stacks: what does not fit with the hero stays at home.
+            let mut over = player_army.0.slots().saturating_sub(HERO_SLOTS);
+            for stack in player_army.0.stacks.clone().into_iter().rev() {
+                let n = over.min(stack.count);
+                if n > 0 {
+                    player_army.0.remove(stack.kind, n);
+                    garrison.add(stack.kind, n);
+                    over -= n;
+                }
+            }
+        }
         let (loser, loot) = world.capture(encounter.source, &mut treasuries);
         treasuries.add(Faction::Reclaimers, loot);
-        log.push(format!("Victory over the {}! +{loot} gold.", loser.name()));
-        nearby.say_for(
-            format!("Victory over the {}: +{loot} gold. Survivors: {}", loser.name(), player_army.0.summary()),
-            8.0,
-        );
+        let won = match encounter.defending {
+            Some(place) => format!("The siege of your {} is broken! The {} are beaten", place.noun(), loser.name()),
+            None => format!("Victory over the {}", loser.name()),
+        };
+        log.push(format!("{won}! +{loot} gold."));
+        nearby.say_for(format!("{won}: +{loot} gold. Survivors: {}", player_army.0.summary()), 8.0);
         CombatResult::Victory { loot }
     } else {
         let winner = world.faction_of(encounter.source);
         let gold_lost = treasuries.take_half(Faction::Reclaimers);
         treasuries.add(winner, gold_lost);
         *player_army = PlayerArmy::default();
+        if let (Some(place), EncounterSource::AiArmy(i)) = (encounter.defending, encounter.source) {
+            world.siege_lost(i, place, survivors(Team::Enemy, false));
+            log.push(format!("Your {} falls to the {}.", place.noun(), winner.name()));
+        }
         world.hero_pos = world.hero_home_pos();
         log.push(format!("Defeat. The {} take {gold_lost} gold.", winner.name()));
         nearby.say_for(

@@ -9,15 +9,27 @@ use super::hud::{ActiveMarker, CombatLog, CountLabel, Hovered, count_text};
 use super::turn::{ActiveStack, TurnOrder};
 use crate::assets::{UnitArt, UnitVisual, unit_scale};
 use crate::faction::Faction;
-use crate::overworld::PendingEncounter;
+use crate::overworld::{PendingEncounter, WorldState};
 use crate::states::{CombatPhase, GameState};
 use crate::units::{Army, PlayerArmy, Stack, Team};
+
+/// In a siege you JOINed, the garrison and the attackers are already fighting at the walls: they
+/// start in these columns near the middle (two apart, so melee reaches on the first move), while
+/// your own army arrives from the left edge as usual. Nearest to the front first.
+const SIEGE_GUARD_COLUMNS: [i32; 2] = [5, 4];
+const SIEGE_ENEMY_COLUMNS: [i32; 2] = [7, 8];
+
+/// A stack from the garrison of the castle or tower you JOINed the siege of. It is yours to
+/// command like any other; after a win its survivors go back into the garrison. Tagged "GUARD".
+#[derive(Component)]
+pub struct FromGarrison;
 
 pub fn spawn_battle(
     mut commands: Commands,
     mut art: UnitArt,
     encounter: Res<PendingEncounter>,
     player_army: Res<PlayerArmy>,
+    world: Res<WorldState>,
     mut camera: Single<&mut Transform, With<Camera2d>>,
     mut next_phase: ResMut<NextState<CombatPhase>>,
 ) {
@@ -29,9 +41,11 @@ pub fn spawn_battle(
     commands.insert_resource(ActionLock::default());
 
     let mut log = CombatLog::default();
+    let guard = encounter.defending.map(|place| place.army(&world).clone());
     log.push(format!(
-        "Battle: {} vs {}",
+        "Battle: {}{} vs {}",
         player_army.0.faction.name(),
+        encounter.defending.map_or(String::new(), |place| format!(" and your {} garrison", place.noun())),
         encounter.enemy.faction.name()
     ));
     commands.insert_resource(log);
@@ -51,8 +65,23 @@ pub fn spawn_battle(
     }
 
     let mut order = Vec::new();
-    place_army(&mut commands, &mut art, &grid, Team::Player, &player_army.0, &mut order);
-    place_army(&mut commands, &mut art, &grid, Team::Enemy, &encounter.enemy, &mut order);
+    // Your own stacks at the left edge. In a siege you joined, the garrison and the attackers start
+    // face to face in the middle; otherwise the enemy is at the right edge.
+    let alive = |army: &Army, guard: bool| army.stacks.iter().filter(|s| !s.is_dead()).map(move |s| (*s, guard)).collect::<Vec<_>>();
+    let mine = alive(&player_army.0, false);
+    let theirs = alive(&encounter.enemy, false);
+    let me = player_army.0.faction;
+    place_army(&mut commands, &mut art, &grid, Team::Player, me, mine, &grid.deploy_columns(true), &mut order);
+    match &guard {
+        Some(guard) => {
+            place_army(&mut commands, &mut art, &grid, Team::Player, me, alive(guard, true), &SIEGE_GUARD_COLUMNS, &mut order);
+            place_army(&mut commands, &mut art, &grid, Team::Enemy, encounter.enemy.faction, theirs, &SIEGE_ENEMY_COLUMNS, &mut order);
+        }
+        None => {
+            let columns = grid.deploy_columns(false);
+            place_army(&mut commands, &mut art, &grid, Team::Enemy, encounter.enemy.faction, theirs, &columns, &mut order);
+        }
+    }
     order.shuffle(&mut rand::rng());
     commands.insert_resource(TurnOrder { order, current: 0 });
 
@@ -69,30 +98,34 @@ pub fn spawn_battle(
     next_phase.set(CombatPhase::Turn);
 }
 
-/// Player stacks fill the left columns, enemy stacks the right ones, centred vertically.
+/// Stacks fill `columns` (first one first), centred vertically. Each stack comes with whether it
+/// is from a garrison (`FromGarrison`).
+#[allow(clippy::too_many_arguments)]
 fn place_army(
     commands: &mut Commands,
     art: &mut UnitArt,
     grid: &BattleGrid,
     team: Team,
-    army: &Army,
+    faction: Faction,
+    stacks: Vec<(Stack, bool)>,
+    columns: &[i32],
     order: &mut Vec<Entity>,
 ) {
-    let columns = grid.deploy_columns(team == Team::Player);
-    let stacks: Vec<&Stack> = army.stacks.iter().filter(|s| !s.is_dead()).collect();
     let per_column = grid.rows as usize;
     let first_row = (grid.rows - (stacks.len().min(per_column) as i32)) / 2;
 
-    for (i, stack) in stacks.into_iter().enumerate() {
+    for (i, (stack, guard)) in stacks.into_iter().enumerate() {
         let col = columns[(i / per_column) % columns.len()];
         let row = first_row + (i % per_column) as i32;
-        let entity = spawn_stack(commands, art, grid, team, army.faction, *stack, GridPos::new(col, row));
+        let entity = spawn_stack(commands, art, grid, team, faction, stack, GridPos::new(col, row), guard);
         order.push(entity);
     }
 }
 
 /// One stack = a translucent team-coloured plate (this is what you click), the animated unit
-/// sprite of its kind in the faction's colour on top, a count/HP label below and a YOU/ENEMY tag.
+/// sprite of its kind in the faction's colour on top, a count/HP label below and a YOU/GUARD/ENEMY
+/// tag. `guard` = a stack from the garrison of a siege you joined (`FromGarrison`).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_stack(
     commands: &mut Commands,
     art: &mut UnitArt,
@@ -101,45 +134,46 @@ pub fn spawn_stack(
     faction: Faction,
     stack: Stack,
     pos: GridPos,
+    guard: bool,
 ) -> Entity {
     let size = grid.tile_size * 0.9;
     let plate = team.color().to_srgba();
     let visual = UnitVisual::new(faction, stack.kind, team == Team::Enemy);
-    commands
-        .spawn((
-            stack,
-            team,
-            faction,
-            pos,
-            Sprite::from_color(Color::srgba(plate.red, plate.green, plate.blue, 0.35), Vec2::splat(size)),
-            Transform::from_translation(grid.to_world(pos).extend(1.0)),
-            Pickable::default(),
-            DespawnOnExit(GameState::Combat),
-            children![
-                art.bundle(visual, unit_scale(stack.kind), Vec2::new(0.0, -size * 0.3), 0.1),
-                // Count and lead-unit HP, refreshed by hud::refresh_stack_labels.
-                (
-                    CountLabel,
-                    Text2d::new(count_text(&stack)),
-                    TextFont { font_size: FontSize::Px(11.0), ..default() },
-                    TextColor(Color::WHITE),
-                    Transform::from_xyz(0.0, -size / 2.0 + 7.0, 0.2),
-                    Pickable::IGNORE,
-                ),
-                // YOU / ENEMY tag.
-                (
-                    Text2d::new(team.label()),
-                    TextFont { font_size: FontSize::Px(12.0), ..default() },
-                    TextColor(team.color()),
-                    Transform::from_xyz(0.0, size / 2.0 + 8.0, 0.2),
-                    Pickable::IGNORE,
-                ),
-            ],
-        ))
-        .observe(on_stack_click)
-        .observe(on_stack_over)
-        .observe(on_stack_out)
-        .id()
+    let tag = if guard { "GUARD" } else { team.label() };
+    let mut entity = commands.spawn((
+        stack,
+        team,
+        faction,
+        pos,
+        Sprite::from_color(Color::srgba(plate.red, plate.green, plate.blue, 0.35), Vec2::splat(size)),
+        Transform::from_translation(grid.to_world(pos).extend(1.0)),
+        Pickable::default(),
+        DespawnOnExit(GameState::Combat),
+        children![
+            art.bundle(visual, unit_scale(stack.kind), Vec2::new(0.0, -size * 0.3), 0.1),
+            // Count and lead-unit HP, refreshed by hud::refresh_stack_labels.
+            (
+                CountLabel,
+                Text2d::new(count_text(&stack)),
+                TextFont { font_size: FontSize::Px(11.0), ..default() },
+                TextColor(Color::WHITE),
+                Transform::from_xyz(0.0, -size / 2.0 + 7.0, 0.2),
+                Pickable::IGNORE,
+            ),
+            // YOU / GUARD / ENEMY tag.
+            (
+                Text2d::new(tag),
+                TextFont { font_size: FontSize::Px(12.0), ..default() },
+                TextColor(team.color()),
+                Transform::from_xyz(0.0, size / 2.0 + 8.0, 0.2),
+                Pickable::IGNORE,
+            ),
+        ],
+    ));
+    if guard {
+        entity.insert(FromGarrison);
+    }
+    entity.observe(on_stack_click).observe(on_stack_over).observe(on_stack_out).id()
 }
 
 fn player_may_act(active: &Query<&Team, With<ActiveStack>>, lock: &ActionLock) -> bool {
