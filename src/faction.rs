@@ -18,7 +18,12 @@ pub enum Faction {
 
 impl Faction {
     /// The four factions that own a base. Index 0 is always the player.
-    pub const KINGDOMS: [Faction; 4] = [Faction::Reclaimers, Faction::Red, Faction::Purple, Faction::Yellow];
+    pub const KINGDOMS: [Faction; 4] = [
+        Faction::Reclaimers,
+        Faction::Red,
+        Faction::Purple,
+        Faction::Yellow,
+    ];
 
     pub fn is_player(self) -> bool {
         self == Faction::Reclaimers

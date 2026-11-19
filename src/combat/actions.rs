@@ -105,6 +105,21 @@ const DEATH_DUST_SCALE: f32 = 1.4;
 #[derive(Component)]
 pub struct Dying;
 
+/// Why `stack` cannot strike a target `distance` tiles away, or `None` if it can. Used by the
+/// strike itself and by the mouse cursor.
+pub fn strike_out_of_reach(stack: &Stack, distance: i32) -> Option<String> {
+    let (min_range, max_range) = stack.stats().range;
+    if !stack.is_ranged() && distance != 1 {
+        Some("target is not next to you (the 8 surrounding tiles)".to_string())
+    } else if stack.is_ranged() && distance < min_range as i32 {
+        Some(format!("too close: range is {min_range}-{max_range} tiles"))
+    } else if stack.is_ranged() && distance > max_range as i32 {
+        Some(format!("out of range: range is {min_range}-{max_range} tiles"))
+    } else {
+        None
+    }
+}
+
 /// Keyboard part of the player's input. Clicks are handled by observers in `spawn.rs`.
 pub fn player_input(
     keys: Res<ButtonInput<KeyCode>>,
@@ -323,19 +338,11 @@ pub fn resolve_actions(
                 let Some(other) = snapshot.iter().find(|o| o.entity == target).copied() else {
                     continue;
                 };
-                let stats = my_stack.stats();
-                let (min_range, max_range) = stats.range;
                 let distance = my_pos.distance_to(other.pos);
                 let reason = if other.team == my_team {
                     Some("that is your own stack (click it to merge)".to_string())
-                } else if !my_stack.is_ranged() && distance != 1 {
-                    Some("target is not next to you (the 8 surrounding tiles)".to_string())
-                } else if my_stack.is_ranged() && distance < min_range as i32 {
-                    Some(format!("too close: range is {min_range}-{max_range} tiles"))
-                } else if my_stack.is_ranged() && distance > max_range as i32 {
-                    Some(format!("out of range: range is {min_range}-{max_range} tiles"))
                 } else {
-                    None
+                    strike_out_of_reach(&my_stack, distance)
                 };
                 if let Some(reason) = reason {
                     log.push(format!("{}: {reason}.", who(&my_stack)));

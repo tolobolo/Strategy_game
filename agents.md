@@ -393,6 +393,7 @@ cleans them up automatically.
 | Module | Plugin | Owns |
 |---|---|---|
 | `src/main.rs` | – | App setup, window, camera, asset root |
+| `src/cursor.rs` | `CursorPlugin` | Mouse cursor images and the corner frame on combat click targets (§6.6) |
 | `src/states.rs` | `StatesPlugin` | `GameState`, `CombatPhase` |
 | `src/faction.rs` | – | `Faction` enum: colour, name, sprite folder |
 | `assets/units.ron` | – | Balance sheet: base stats, price and abilities of every unit kind |
@@ -431,6 +432,7 @@ cleans them up automatically.
 |---|---|---|
 | `Hero`, `MoveSpeed` | overworld hero | The player avatar |
 | `Touchable { touch, radius }` | buildings, towers, sellers | What touching it means (`Touch::Castle/Shop/Tower/Seller`) |
+| `ClickCursor` | combat action buttons | Shows the hand while hovered (brings Bevy's `Hovered`) |
 | `AiArmyMarker(i)`, `BanditMarker(i)` | roaming armies | Index into `WorldState.armies` / `.bandits`; transforms are synced from there |
 | `BuildingSprite { kind, shown, swap }` | buildings, towers | Which owner colour the sprite shows and the pending swap after a capture |
 | `ArmyLabel` | roamer children | Floating text kept in sync with the army |
@@ -458,6 +460,7 @@ cleans them up automatically.
 | `IncomeTimer` | always | 30 s tick for castle and tower income |
 | `PlayerArmy` | always | The stacks the hero carries (max 20 slots). Starts empty |
 | `Nearby` | always | What the hero is touching + a short HUD message |
+| `CursorWanted` | always | The cursor and corner frame this frame; set in `Update`, shown and reset in `PostUpdate` |
 | `WorldMapOpen` | always | Whether the `M` map overlay is showing |
 | `OpenShop` | always | The shop panel's target while it is open |
 | `OpenCastle` | always | The castle panel's base and selected unit kind while it is open |
@@ -497,7 +500,8 @@ OnEnter(Combat)             spawn_battle (grid, stacks, turn order) ; spawn_hud
 OnEnter(CombatPhase::Turn)  activate_current_stack
 Update [CombatPhase::Turn]  player_input -> enemy_ai -> resolve_actions -> check_victory
                             (clicks on tiles/stacks are observers in spawn.rs that write CombatAction)
-Update [Combat]             hud refresh systems (labels, turn strip, panel, active marker, reachable tiles)
+Update [Combat]             hud refresh systems (labels, turn strip, panel, active marker, reachable tiles, combat_cursor)
+PostUpdate                  hand_over_buttons -> apply_cursor (CursorPlugin)
 OnEnter(CombatPhase::Finished) show_result ; Update: wait_for_continue -> Overworld
 ```
 
@@ -730,6 +734,23 @@ by `wire_shop_buttons` after the panel is spawned, so there is no per-frame "is 
 checking anywhere. Resource: `OpenShop(Option<ShopTarget>)`; `None` despawns the panel.
 
 Not done yet: the world map as a UI texture instead of a generated image.
+
+### 6.6 Mouse cursor (`src/cursor.rs`)
+
+The pack's cursors (`ui_elements/ui_elements/cursors/`) replace the system one. Each 64 px sheet is
+drawn cropped to its visible part, with the hotspot on the tip. **The mouse only matters in battle**:
+on the overworld (keyboard only) the cursor is always the arrow.
+
+| Cursor | Sheet | When (in battle) |
+|---|---|---|
+| Arrow | `cursor_01` | Not your turn, an action playing, no AP left, or over the active stack |
+| Hand | `cursor_02` | A combat button (`ClickCursor`), or a target a click would act on |
+| No | `cursor_03` | A tile or stack a click would not work on |
+| Corner frame | `cursor_04` | Not a cursor (128 px is too big for one): a 9-sliced sprite drawn **around** the hand's target |
+
+`hud::combat_cursor`: a tile the active stack can move to, an enemy it can strike
+(`actions::strike_out_of_reach`, the same check the strike uses) or a stack of yours it can merge
+with → hand + frame; any other tile or stack → no sign.
 
 ---
 

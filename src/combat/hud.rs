@@ -3,15 +3,19 @@
 
 use std::collections::VecDeque;
 
+use bevy::picking::hover::HoverMap;
+use bevy::picking::pointer::PointerId;
 use bevy::prelude::*;
 
-use super::actions::{ActionLock, CombatAction, Dying};
+use super::actions::{ActionLock, CombatAction, Dying, strike_out_of_reach};
 use super::grid::{BattleGrid, GridPos, Tile};
 use super::turn::{AP_PER_TURN, ActionPoints, ActiveStack, CombatResult, TurnOrder};
 use crate::assets::GameAssets;
+use crate::cursor::{ClickCursor, CursorKind, CursorWanted};
 use crate::faction::Faction;
 use crate::states::GameState;
 use crate::ui::{avatar_handle, finish_banner, panel, sliced};
+use crate::units::rules::can_merge;
 use crate::units::{ShieldUp, Stack, Team, UnitKind};
 
 // ---------- resources ----------
@@ -280,7 +284,7 @@ pub fn spawn_hud(mut commands: Commands, assets: Res<GameAssets>) {
 /// Attach the click behaviour to the action buttons once they exist.
 pub fn wire_combat_buttons(mut commands: Commands, buttons: Query<Entity, Added<ActionButton>>) {
     for entity in &buttons {
-        commands.entity(entity).observe(on_button_press).observe(on_button_release).observe(on_button_click);
+        commands.entity(entity).insert(ClickCursor).observe(on_button_press).observe(on_button_release).observe(on_button_click);
     }
 }
 
@@ -551,6 +555,53 @@ pub fn highlight_reachable_tiles(
         if sprite.color != color {
             sprite.color = color;
         }
+    }
+}
+
+/// On the player's turn the cursor shows what a click would do: the hand and a corner frame on
+/// a tile the active stack can move to, an enemy it can strike or a stack of yours it can merge
+/// with; the "no" sign on any other tile or stack. The arrow on the active stack and while the
+/// enemy acts or an action plays.
+pub fn combat_cursor(
+    hover: Res<HoverMap>,
+    lock: Res<ActionLock>,
+    grid: Res<BattleGrid>,
+    active: Query<(Entity, &GridPos, &Team, &Stack, &ActionPoints), With<ActiveStack>>,
+    stacks: Query<(&GridPos, &Team, &Stack), Without<Dying>>,
+    tiles: Query<&GridPos, With<Tile>>,
+    mut wanted: ResMut<CursorWanted>,
+) {
+    let Ok((me, my_pos, my_team, my_stack, ap)) = active.single() else { return };
+    if *my_team != Team::Player || ap.0 == 0 || lock.is_locked() {
+        return;
+    }
+    let Some(hits) = hover.get(&PointerId::Mouse) else { return };
+    let frame = |pos: GridPos| Rect::from_center_size(grid.to_world(pos), Vec2::splat(grid.tile_size));
+    for &entity in hits.keys() {
+        if entity == me {
+            return;
+        }
+        if let Ok((pos, team, stack)) = stacks.get(entity) {
+            let ok = match team {
+                Team::Enemy => strike_out_of_reach(my_stack, my_pos.distance_to(*pos)).is_none(),
+                Team::Player => my_pos.is_adjacent(*pos) && can_merge(my_stack, stack),
+            };
+            return show(&mut wanted, ok, frame(*pos));
+        }
+        if let Ok(pos) = tiles.get(entity) {
+            let steps = my_pos.steps_to(*pos);
+            let free = !stacks.iter().any(|(p, ..)| p == pos);
+            let ok = free && steps >= 1 && steps <= my_stack.stats().speed as i32;
+            return show(&mut wanted, ok, frame(*pos));
+        }
+    }
+}
+
+fn show(wanted: &mut CursorWanted, ok: bool, frame: Rect) {
+    if ok {
+        wanted.set(CursorKind::Hand, Some(frame));
+    } else {
+        wanted.set(CursorKind::No, None);
     }
 }
 

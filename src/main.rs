@@ -3,6 +3,7 @@
 
 mod assets;
 mod combat;
+mod cursor;
 mod faction;
 mod overworld;
 mod shots;
@@ -47,6 +48,7 @@ fn main() {
             assets::GameAssetsPlugin,
             overworld::OverworldPlugin,
             combat::CombatPlugin,
+            cursor::CursorPlugin,
             shots::ShotsPlugin,
         ))
         .add_systems(Startup, spawn_camera)

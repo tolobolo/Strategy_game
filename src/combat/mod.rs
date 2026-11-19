@@ -44,6 +44,7 @@ impl Plugin for CombatPlugin {
                     hud::show_ability_buttons,
                     hud::follow_active_marker,
                     hud::highlight_reachable_tiles,
+                    hud::combat_cursor,
                     actions::tween_stack_moves,
                     actions::fly_projectiles,
                     actions::shield_visuals,
