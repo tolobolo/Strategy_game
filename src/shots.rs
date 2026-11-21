@@ -106,6 +106,15 @@ fn plan_shots(mut world: ResMut<WorldState>, windows: Query<&Window>, mut shots:
         let name = format!("seed{seed}_site_{}.png", kind.name().replace(' ', "_").to_lowercase());
         shots.list.push((name, world.terrain.world_pos(tile), CLOSE_UP_SCALE));
     }
+    // A beaten AI army: its ghost flies to its castle gate and waits there.
+    if let Some(i) = world.armies.iter().position(|a| a.alive)
+        && let Some(base) = world.base_of(world.armies[i].faction)
+    {
+        let gate = world.terrain.world_pos(base.spawn_tile());
+        world.armies[i].pos = gate + Vec2::new(-200.0, 120.0);
+        world.armies[i].die();
+        shots.list.push((format!("seed{seed}_ghost.png"), gate + Vec2::new(-60.0, 40.0), CLOSE_UP_SCALE));
+    }
     // Last: the crafting panel at your House (hero moved there when the shot comes up).
     if let Some((kind, tile)) = world.home_base().buildings().find(|(k, _)| *k == BuildingKind::House) {
         let size = kind.size().as_vec2();

@@ -139,6 +139,10 @@ pub fn check_victory(
             }
         }
         let (loser, loot) = world.capture(encounter.source, &mut treasuries);
+        // The armies that came to help the place are beaten with it.
+        for &i in &encounter.helpers {
+            world.armies[i].die();
+        }
         treasuries.add(Faction::Reclaimers, loot);
         let won = match encounter.defending {
             Some(place) => format!("The siege of your {} is broken! The {} are beaten", place.noun(), loser.name()),

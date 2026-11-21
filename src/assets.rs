@@ -51,6 +51,9 @@ pub struct GameAssets {
     pub sheep_move: Strip,
     pub sheep_grass: Strip,
     pub sheep_idle: Strip,
+    /// `units/ghost/ghost_knight_cut.png` (9 frames of 224×241, cut out of `ghost_knight.png`): a
+    /// beaten AI army flying home.
+    pub ghost: Strip,
     /// `wood_resource`, `gold_resource`, `meat_resource`: the load popping up at a delivery.
     pub resource_pops: HashMap<ResourceKind, Handle<Image>>,
     /// One-shot particle effects from `particle_fx/`, indexed by `Fx`.
@@ -243,6 +246,7 @@ fn load_assets(server: &AssetServer, layouts: &mut Assets<TextureAtlasLayout>) -
         let path = format!("terrain/resources/gold/gold_stones/gold_stone_{}_highlight.png", i + 1);
         strip(server, layouts, &path, UVec2::splat(128), 6)
     });
+    assets.ghost = strip(server, layouts, "units/ghost/ghost_knight_cut.png", UVec2::new(224, 241), 9);
     assets.sheep_move = strip(server, layouts, "terrain/resources/meat/sheep/sheep_move.png", UVec2::splat(128), 4);
     assets.sheep_grass = strip(server, layouts, "terrain/resources/meat/sheep/sheep_grass.png", UVec2::splat(128), 12);
     assets.sheep_idle = strip(server, layouts, "terrain/resources/meat/sheep/sheep_idle.png", UVec2::splat(128), 6);

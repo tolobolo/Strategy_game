@@ -40,6 +40,9 @@ pub struct PendingEncounter {
     pub source: EncounterSource,
     /// Set when you JOIN a siege: that castle's or tower's garrison fights on your side.
     pub defending: Option<Garrison>,
+    /// AI armies (indices) that came to help the castle or tower you attack: they fight in
+    /// `enemy` too, and are destroyed if you win.
+    pub helpers: Vec<usize>,
 }
 
 /// A 5×4 kingdom base.
@@ -182,10 +185,18 @@ impl WorldState {
 
     /// The AI army besieging `place` right now (standing at it, counting down), if any.
     pub fn besieger(&self, place: Garrison) -> Option<usize> {
+        self.besiegers(place).first().copied()
+    }
+
+    /// Every AI army besieging `place` right now (they speed the siege up together).
+    pub fn besiegers(&self, place: Garrison) -> Vec<usize> {
         use super::armies::AiArmyState;
-        self.armies
-            .iter()
-            .position(|a| a.alive && a.target == Some(place) && matches!(a.state, AiArmyState::Capturing(_)))
+        (0..self.armies.len())
+            .filter(|&i| {
+                let a = &self.armies[i];
+                a.alive && a.target == Some(place) && matches!(a.state, AiArmyState::Capturing(_))
+            })
+            .collect()
     }
 
     /// You lost the siege fight you joined: the attacker keeps its `survivors`, leaves part of
@@ -323,9 +334,7 @@ impl WorldState {
             }
             EncounterSource::AiArmy(i) => {
                 let army = &mut self.armies[i];
-                army.alive = false;
-                army.respawn_in = armies::AI_RESPAWN_SECS;
-                army.army = Army::empty(army.faction);
+                army.die();
                 (army.faction, treasuries.take_pct(army.faction, loot_pct))
             }
             EncounterSource::Bandits(i) => {

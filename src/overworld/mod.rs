@@ -85,6 +85,10 @@ struct HudPrompt;
 #[derive(Component)]
 struct LandUnitedBanner;
 
+/// Shown when your last castle has fallen.
+#[derive(Component)]
+struct LostBanner;
+
 /// A building or tower whose label follows `WorldState`.
 #[derive(Component)]
 struct BuildingVisual(Touch);
@@ -138,6 +142,7 @@ impl Plugin for OverworldPlugin {
                         armies::ai_armies_act,
                         armies::bandits_wander,
                         armies::respawn_roamers,
+                        armies::sync_ghosts,
                         armies::refresh_army_labels,
                         armies::animate_roamers,
                     )
@@ -161,6 +166,7 @@ impl Plugin for OverworldPlugin {
                     (craft_panel::toggle_craft, craft_panel::wire_craft_buttons, craft_panel::refresh_craft_panel).chain(),
                     (army_panel::toggle_army, army_panel::refresh_army_panel, army_panel::wire_army_buttons, army_panel::refresh_army_slots).chain(),
                     refresh_overworld_hud,
+                    check_game_over,
                 )
                     .chain()
                     .run_if(in_state(GameState::Overworld)),
@@ -531,7 +537,7 @@ fn spawn_overworld(
 
     // Roaming armies and bandits.
     for (i, army) in world.armies.iter().enumerate().filter(|(_, a)| a.alive) {
-        armies::spawn_ai_army_entity(&mut commands, &mut art, army, i);
+        armies::spawn_ai_army_entity(&mut commands, &mut art, army, i, &world);
     }
     for (i, squad) in world.bandits.iter().enumerate().filter(|(_, b)| b.alive) {
         armies::spawn_bandit_entity(&mut commands, &mut art, &mut meshes, &mut materials, squad, i);
@@ -612,6 +618,38 @@ fn spawn_overworld(
         // The last win: the whole message on one big ribbon.
         children![big_ribbon(&assets, Faction::Reclaimers, "YOU UNITED THE LAND!\nEvery castle is yours.", 2.2)],
     ));
+    commands.spawn((
+        LostBanner,
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        Visibility::Hidden,
+        Pickable::IGNORE,
+        DespawnOnExit(GameState::Overworld),
+        children![big_ribbon(&assets, Faction::Red, "YOU LOST!\nYour last castle has fallen.", 2.2)],
+    ));
+}
+
+/// Your last castle has fallen: the game is lost. The banner shows and the world stops (virtual
+/// time is paused, so nobody moves any more).
+fn check_game_over(
+    world: Res<WorldState>,
+    mut banner: Single<&mut Visibility, With<LostBanner>>,
+    mut time: ResMut<Time<Virtual>>,
+) {
+    if world.castles_owned() > 0 {
+        return;
+    }
+    if **banner != Visibility::Visible {
+        **banner = Visibility::Visible;
+    }
+    if !time.is_paused() {
+        time.pause();
+    }
 }
 
 /// WASD / arrows. Water blocks. A change of layer is only allowed through a staircase

@@ -65,9 +65,26 @@ pub fn start_fight(
     if enemy.is_empty() {
         return false;
     }
-    commands.insert_resource(PendingEncounter { enemy, source, defending: None });
+    commands.insert_resource(PendingEncounter { enemy, source, defending: None, helpers: Vec::new() });
     next_state.set(GameState::Combat);
     true
+}
+
+/// The AI armies of `owner` standing within `HELP_TILES` of `place` (not busy besieging something
+/// else): they join the fight when you attack it.
+pub fn helpers_of(world: &WorldState, place: Garrison) -> Vec<usize> {
+    use super::armies::{AiArmyState, HELP_TILES};
+    let owner = place.owner(world);
+    let at = world.terrain.world_pos(place.tile(world));
+    world
+        .armies
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.alive && a.faction == owner && !a.army.is_empty())
+        .filter(|(_, a)| !matches!(a.state, AiArmyState::Capturing(_) | AiArmyState::Leaving(_)))
+        .filter(|(_, a)| a.pos.distance(at) <= HELP_TILES * super::terrain::TILE)
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// JOIN at your besieged castle or tower: you and its garrison fight the besieging AI army
@@ -81,7 +98,8 @@ pub fn join_siege(
     world: &WorldState,
     place: Garrison,
 ) -> bool {
-    let Some(i) = world.besieger(place) else {
+    let besiegers = world.besiegers(place);
+    let Some(&i) = besiegers.first() else {
         nearby.say("Nobody is attacking it right now.");
         return false;
     };
@@ -89,10 +107,16 @@ pub fn join_siege(
         nearby.say("Nobody to fight with: you have no army and the garrison is empty.");
         return false;
     }
+    // Every army besieging it fights you together; the first is the "source", the rest helpers.
+    let mut enemy = world.armies[i].army.clone();
+    for &j in &besiegers[1..] {
+        enemy.stacks.extend(world.armies[j].army.stacks.iter().copied());
+    }
     commands.insert_resource(PendingEncounter {
-        enemy: world.armies[i].army.clone(),
+        enemy,
         source: EncounterSource::AiArmy(i),
         defending: Some(place),
+        helpers: besiegers[1..].to_vec(),
     });
     next_state.set(GameState::Combat);
     true
@@ -328,22 +352,36 @@ pub fn trigger_fights(
     player_army: Res<PlayerArmy>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
-    let source = match nearby.touch {
-        Some(Touch::Castle(i)) if !world.bases[i].owner.is_player() => EncounterSource::Base(i),
+    let (source, place) = match nearby.touch {
+        Some(Touch::Castle(i)) if !world.bases[i].owner.is_player() => (EncounterSource::Base(i), Garrison::Castle(i)),
         Some(Touch::Tower(i)) if !world.towers[i].owner.is_player() => {
             // An army in the middle of taking it blocks the door.
             if world.tower_being_taken_by(i).is_some() {
                 return;
             }
-            EncounterSource::Tower(i)
+            (EncounterSource::Tower(i), Garrison::Tower(i))
         }
         _ => return,
     };
-    if world.enemy_army_for(source).is_empty() {
+    // Its kingdom's armies close by come to its defence (agents.md §1.5).
+    let helpers = helpers_of(&world, place);
+    let mut enemy = world.enemy_army_for(source);
+    for &i in &helpers {
+        enemy.stacks.extend(world.armies[i].army.stacks.iter().copied());
+    }
+    if enemy.is_empty() {
         let (loser, loot) = world.capture(source, &mut treasuries);
         treasuries.add(Faction::Reclaimers, loot);
         nearby.say(format!("Undefended! Taken from the {} (+{loot}g).", loser.name()));
         return;
     }
-    start_fight(&mut commands, &mut next_state, &mut nearby, &player_army, &world, source);
+    if player_army.0.is_empty() {
+        nearby.say("You need an army! Take units from your castle (number keys) first.");
+        return;
+    }
+    if !helpers.is_empty() {
+        nearby.say_for(format!("The {} army defends its {} with the garrison!", place.owner(&world).name(), place.noun()), 6.0);
+    }
+    commands.insert_resource(PendingEncounter { enemy, source, defending: None, helpers });
+    next_state.set(GameState::Combat);
 }

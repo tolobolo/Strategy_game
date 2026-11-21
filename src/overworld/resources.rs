@@ -358,6 +358,13 @@ fn work_spot(site: &Site, terrain: &TerrainMap, n: usize) -> IVec2 {
     if open.is_empty() { site.tile } else { open[n % open.len()] }
 }
 
+/// An AI army caught worker `i`: it is gone (its Pawn too), and frees what it had claimed.
+pub fn kill_worker(workers: &mut [Worker], sites: &mut [Site], i: usize) {
+    let worker = &mut workers[i];
+    release(worker, &mut sites[worker.site]);
+    worker.alive = false;
+}
+
 /// Free whatever tree or sheep the worker had claimed.
 fn release(worker: &Worker, site: &mut Site) {
     let slot = match worker.state {
