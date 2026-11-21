@@ -68,6 +68,8 @@ const ALERT_TILES: f32 = 6.0;
 const GUARD_SECS: f32 = 15.0;
 /// AI armies within this many tiles of their own tower or castle join the fight when you attack it.
 pub const HELP_TILES: f32 = 5.0;
+/// A fight between two armies, or an army and bandits, lasts this long before it is decided.
+pub const FIGHT_SECS: f32 = 6.0;
 /// Armies rethink (and re-plan their path) this often.
 const THINK_SECS: f32 = 0.5;
 /// Patrols walk to random spots this far (tiles) from home.
@@ -83,6 +85,14 @@ pub enum Prey {
     Worker(usize),
 }
 
+/// Who an AI army is fighting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Foe {
+    /// Another kingdom's army (index into `WorldState::armies`).
+    Army(usize),
+    Bandits(usize),
+}
+
 /// What a roaming AI army is doing right now. Its label says it in words (agents.md §1.5).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AiArmyState {
@@ -96,6 +106,8 @@ pub enum AiArmyState {
     Defending { place: Garrison, left: f32 },
     /// You are much stronger: running home.
     Fleeing,
+    /// Locked in a fight; it is decided (auto-resolve) when `left` runs out.
+    Fighting { foe: Foe, left: f32 },
     /// Besieging its target tower or castle; seconds until it is auto-resolved.
     Capturing(f32),
     /// Watching the capture animation; seconds until it walks on.
@@ -156,6 +168,8 @@ pub struct BanditSquad {
     pub path: Vec<IVec2>,
     pub alive: bool,
     pub respawn_in: f32,
+    /// Fighting this AI army (index): it stands still until the fight is decided.
+    pub fighting: Option<usize>,
 }
 
 #[derive(Component)]
@@ -231,6 +245,7 @@ pub fn initial_bandits(world: &WorldState, rng: &mut impl Rng) -> Vec<BanditSqua
                 path: Vec::new(),
                 alive: true,
                 respawn_in: 0.0,
+                fighting: None,
             }
         })
         .collect()
@@ -298,6 +313,10 @@ fn army_text(army: &AiArmy, world: &WorldState) -> String {
         AiArmyState::Defending { place, .. } if !army.path.is_empty() => format!("coming to help its {}", place.noun()),
         AiArmyState::Defending { left, .. } => format!("guarding... {}s", left.ceil() as u32),
         AiArmyState::Fleeing => "fleeing home".to_string(),
+        AiArmyState::Fighting { foe: Foe::Army(j), left } => {
+            format!("fighting the {} army... {}s", world.armies[j].faction.name(), left.ceil() as u32)
+        }
+        AiArmyState::Fighting { foe: Foe::Bandits(_), left } => format!("fighting bandits... {}s", left.ceil() as u32),
         AiArmyState::Capturing(left) => format!("besieging... {}s", left.ceil() as u32),
         AiArmyState::Leaving(_) => "taken!".to_string(),
         AiArmyState::Returning => "returning home".to_string(),
@@ -319,7 +338,8 @@ pub fn territory_distance(faction: Faction, tile: IVec2, towers: &[Tower], bases
 }
 
 fn bandit_text(squad: &BanditSquad) -> String {
-    format!("Bandits ({}g)\n{}", squad.gold, squad.army.summary())
+    let fighting = if squad.fighting.is_some() { "\nfighting!" } else { "" };
+    format!("Bandits ({}g)\n{}{fighting}", squad.gold, squad.army.summary())
 }
 
 // ---------- systems (Update, Overworld) ----------
@@ -691,6 +711,32 @@ pub fn ai_armies_act(
                 }
                 continue;
             }
+            AiArmyState::Fighting { foe, left } => {
+                let left = left - dt;
+                match foe {
+                    Foe::Bandits(b) => {
+                        let squad = &mut bandits[b];
+                        if !squad.alive {
+                            army.state = AiArmyState::Walking;
+                        } else if left > 0.0 {
+                            army.state = AiArmyState::Fighting { foe, left };
+                        } else {
+                            squad.fighting = None;
+                            if autoresolve::resolve(&mut army.army, &mut squad.army, &mut rng) {
+                                squad.alive = false;
+                                squad.respawn_in = BANDIT_RESPAWN_SECS;
+                                treasuries.add(army.faction, std::mem::take(&mut squad.gold));
+                                army.state = AiArmyState::Walking;
+                            } else {
+                                army.die();
+                            }
+                        }
+                    }
+                    // Decided below, where both armies are at hand.
+                    Foe::Army(_) => army.state = AiArmyState::Fighting { foe, left },
+                }
+                continue;
+            }
             AiArmyState::Leaving(left) => {
                 let left = left - dt;
                 if left > 0.0 {
@@ -820,15 +866,12 @@ pub fn ai_armies_act(
                     Prey::Hero => {}
                     Prey::Bandits(b) => {
                         let squad = &mut bandits[b];
-                        if squad.alive && squad.pos.distance(army.pos) <= TOUCH_DISTANCE {
-                            if autoresolve::resolve(&mut army.army, &mut squad.army, &mut rng) {
-                                squad.alive = false;
-                                squad.respawn_in = BANDIT_RESPAWN_SECS;
-                                treasuries.add(army.faction, std::mem::take(&mut squad.gold));
-                                army.state = AiArmyState::Walking;
-                            } else {
-                                army.die();
-                            }
+                        if squad.alive && squad.fighting.is_none() && squad.pos.distance(army.pos) <= TOUCH_DISTANCE {
+                            // Caught: both stop and fight for `FIGHT_SECS`.
+                            squad.fighting = Some(idx);
+                            squad.path.clear();
+                            army.path.clear();
+                            army.state = AiArmyState::Fighting { foe: Foe::Bandits(b), left: FIGHT_SECS };
                             army.hunted = 0.0;
                         }
                     }
@@ -856,24 +899,53 @@ pub fn ai_armies_act(
         army.target = None;
     }
 
-    // Armies of different kingdoms that meet fight it out.
+    // Armies of different kingdoms that meet stop and fight for `FIGHT_SECS`; then auto-resolve
+    // decides it. If one of them is gone meanwhile (you beat it), the other walks on.
+    let fighting = |a: &AiArmy, other: usize| matches!(a.state, AiArmyState::Fighting { foe: Foe::Army(x), .. } if x == other);
     for i in 0..armies.len() {
         for j in i + 1..armies.len() {
             let (a, b) = armies.split_at_mut(j);
             let (a, b) = (&mut a[i], &mut b[0]);
+            let (a_on, b_on) = (fighting(a, j), fighting(b, i));
+            if a_on || b_on {
+                if !(a.alive && b.alive) {
+                    for (army, on) in [(&mut *a, a_on), (&mut *b, b_on)] {
+                        if army.alive && on {
+                            army.state = AiArmyState::Walking;
+                        }
+                    }
+                    continue;
+                }
+                let left = match a.state {
+                    AiArmyState::Fighting { left, .. } => left,
+                    _ => 0.0,
+                };
+                if left > 0.0 {
+                    continue;
+                }
+                let a_won = autoresolve::resolve(&mut a.army, &mut b.army, &mut rng);
+                for (army, lost) in [(a, !a_won), (b, a_won)] {
+                    if lost || army.army.is_empty() {
+                        army.die();
+                    } else {
+                        army.state = AiArmyState::Walking;
+                    }
+                }
+                continue;
+            }
+            let busy = |x: &AiArmy| matches!(x.state, AiArmyState::Fighting { .. });
             let meet = a.alive
                 && b.alive
                 && a.faction != b.faction
                 && !a.army.is_empty()
                 && !b.army.is_empty()
+                && !busy(a)
+                && !busy(b)
                 && a.pos.distance(b.pos) <= TOUCH_DISTANCE;
-            if !meet {
-                continue;
-            }
-            let a_won = autoresolve::resolve(&mut a.army, &mut b.army, &mut rng);
-            for (army, lost) in [(a, !a_won), (b, a_won)] {
-                if lost || army.army.is_empty() {
-                    army.die();
+            if meet {
+                for (army, foe) in [(&mut *a, j), (&mut *b, i)] {
+                    army.path.clear();
+                    army.state = AiArmyState::Fighting { foe: Foe::Army(foe), left: FIGHT_SECS };
                 }
             }
         }
@@ -894,9 +966,18 @@ pub fn bandits_wander(
 ) {
     let dt = time.delta_secs();
     let mut rng = rand::rng();
-    let WorldState { bandits, terrain, bases, .. } = &mut *world;
+    let WorldState { bandits, terrain, bases, armies, .. } = &mut *world;
 
-    for squad in bandits.iter_mut().filter(|b| b.alive) {
+    for (i, squad) in bandits.iter_mut().enumerate().filter(|(_, b)| b.alive) {
+        // In a fight: stand still until the army decides it (or is gone).
+        if let Some(a) = squad.fighting {
+            let still = armies[a].alive
+                && matches!(armies[a].state, AiArmyState::Fighting { foe: Foe::Bandits(b), .. } if b == i);
+            if still {
+                continue;
+            }
+            squad.fighting = None;
+        }
         if squad.path.is_empty() {
             let here = terrain.tile_of(squad.pos);
             for _ in 0..20 {
@@ -1099,6 +1180,7 @@ pub fn respawn_roamers(
             path: Vec::new(),
             alive: true,
             respawn_in: 0.0,
+            fighting: None,
         };
         spawn_bandit_entity(&mut commands, &mut art, &mut meshes, &mut materials, squad, i);
     }
@@ -1168,12 +1250,23 @@ pub fn animate_roamers(
                 let (dir, flip) = AttackDir::towards(army.pos, goal.unwrap_or(army.pos));
                 set(children, UnitAnim::Attack(dir), flip);
             }
+            AiArmyState::Fighting { foe, .. } => {
+                let at = match foe {
+                    Foe::Army(j) => world.armies[j].pos,
+                    Foe::Bandits(b) => world.bandits[b].pos,
+                };
+                let (dir, flip) = AttackDir::towards(army.pos, at);
+                set(children, UnitAnim::Attack(dir), flip);
+            }
             _ => set(children, UnitAnim::Idle, None),
         }
     }
     for (marker, children) in &bandits {
         let squad = &world.bandits[marker.0];
-        if squad.path.is_empty() {
+        if let Some(a) = squad.fighting {
+            let (dir, flip) = AttackDir::towards(squad.pos, world.armies[a].pos);
+            set(children, UnitAnim::Attack(dir), flip);
+        } else if squad.path.is_empty() {
             set(children, UnitAnim::Idle, None);
         } else {
             set(children, UnitAnim::Run, facing(squad.pos, &squad.path, &world.terrain));
@@ -1320,7 +1413,7 @@ mod tests {
             |world| {
                 let pos = spot_near_army(world);
                 let squad = &mut world.bandits[0];
-                *squad = BanditSquad { pos, army: Army::new(Faction::Black, &[(UnitKind::Pawn, 1)]), gold: 30, path: Vec::new(), alive: true, respawn_in: 0.0 };
+                *squad = BanditSquad { pos, army: Army::new(Faction::Black, &[(UnitKind::Pawn, 1)]), gold: 30, path: Vec::new(), alive: true, respawn_in: 0.0, fighting: None };
             },
             20,
         );
@@ -1417,6 +1510,30 @@ mod tests {
         }
         assert_eq!(world.armies[0].pos, gate);
         assert!(world.armies[0].respawn_in <= 0.0, "ready to come back");
+    }
+
+    #[test]
+    fn armies_that_meet_fight_for_a_while_first() {
+        let meet = |secs: u32| {
+            lone_army(
+                |world| {
+                    let other = world.armies.iter().position(|a| a.faction != world.armies[0].faction).unwrap();
+                    let pos = world.armies[0].pos;
+                    let army = &mut world.armies[other];
+                    army.alive = true;
+                    army.respawn_in = 0.0;
+                    army.pos = pos + Vec2::new(10.0, 0.0);
+                },
+                secs,
+            )
+            .0
+        };
+        let early = meet(2);
+        let fighters = early.armies.iter().filter(|a| a.alive && matches!(a.state, AiArmyState::Fighting { .. })).count();
+        assert_eq!(fighters, 2, "after 2 s both are still fighting");
+        let late = meet((FIGHT_SECS + 2.0) as u32);
+        assert_eq!(late.armies.iter().filter(|a| a.alive).count(), 1, "after the fight one is left");
+        assert_eq!(late.armies.iter().filter(|a| a.ghost).count(), 1, "the loser flies home as a ghost");
     }
 
     #[test]

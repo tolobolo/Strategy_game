@@ -32,7 +32,7 @@ pub struct ShotsPlugin;
 impl Plugin for ShotsPlugin {
     fn build(&self, app: &mut App) {
         let Ok(dir) = std::env::var("SHOTS_DIR") else { return };
-        app.insert_resource(Shots { dir, list: Vec::new(), next: 0, wait: WARM_UP_FRAMES, house: None })
+        app.insert_resource(Shots { dir, list: Vec::new(), next: 0, wait: WARM_UP_FRAMES, house: None, tower: None })
             .add_systems(OnEnter(GameState::Overworld), plan_shots)
             .add_systems(
                 PostUpdate,
@@ -52,6 +52,8 @@ struct Shots {
     wait: u32,
     /// Where the hero stands for the crafting shot; taken (set to None) once it is staged.
     house: Option<Vec2>,
+    /// The tower for the attack shot, staged like the House.
+    tower: Option<(usize, Vec2)>,
 }
 
 fn plan_shots(mut world: ResMut<WorldState>, windows: Query<&Window>, mut shots: ResMut<Shots>) {
@@ -115,6 +117,13 @@ fn plan_shots(mut world: ResMut<WorldState>, windows: Query<&Window>, mut shots:
         world.armies[i].die();
         shots.list.push((format!("seed{seed}_ghost.png"), gate + Vec2::new(-60.0, 40.0), CLOSE_UP_SCALE));
     }
+    // Your siege of the nearest tower, with the attack panel open (staged when the shot comes up).
+    let home = world.home_base().spawn_tile();
+    if let Some(t) = (0..world.towers.len()).min_by_key(|&t| (world.towers[t].tile - home).abs().element_sum()) {
+        let at = world.terrain.world_pos(world.towers[t].tile);
+        shots.list.push((format!("seed{seed}_attack.png"), at, 1.0));
+        shots.tower = Some((t, at));
+    }
     // Last: the crafting panel at your House (hero moved there when the shot comes up).
     if let Some((kind, tile)) = world.home_base().buildings().find(|(k, _)| *k == BuildingKind::House) {
         let size = kind.size().as_vec2();
@@ -138,6 +147,8 @@ fn take_shots(
     mut world: ResMut<WorldState>,
     mut treasuries: ResMut<Treasuries>,
     mut craft: ResMut<OpenCraft>,
+    mut attack: ResMut<crate::overworld::attack_panel::OpenAttack>,
+    mut army: ResMut<crate::units::PlayerArmy>,
     assets: Res<GameAssets>,
     server: Res<AssetServer>,
     mut exit: MessageWriter<AppExit>,
@@ -150,6 +161,21 @@ fn take_shots(
         return;
     }
     let (name, centre, scale) = shots.list[shots.next].clone();
+    // The attack shot: stand next to the tower with an army, panel open, siege running.
+    if name.ends_with("_attack.png")
+        && let Some((t, at)) = shots.tower.take()
+    {
+        for mut h in &mut hero {
+            h.translation.x = at.x - 40.0;
+            h.translation.y = at.y - 20.0;
+        }
+        army.0.add(crate::units::UnitKind::Warrior, 8);
+        army.0.add(crate::units::UnitKind::Archer, 5);
+        let place = crate::overworld::interact::Garrison::Tower(t);
+        attack.0 = Some(place);
+        world.player_siege = Some(crate::overworld::attack_panel::PlayerSiege { place, left: 7.4 });
+        shots.wait = 20;
+    }
     // The crafting shot: walk the hero to the House, fill the stores, buy a few upgrades, open it.
     if name.ends_with("_crafting.png")
         && let Some(feet) = shots.house.take()

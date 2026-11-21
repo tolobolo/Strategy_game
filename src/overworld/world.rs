@@ -160,6 +160,8 @@ pub struct WorldState {
     pub workers: Vec<Worker>,
     /// What you crafted at the House (agents.md §1.8).
     pub upgrades: crate::upgrades::Upgrades,
+    /// Your siege of a tower or castle in progress (`attack_panel`).
+    pub player_siege: Option<super::attack_panel::PlayerSiege>,
     pub hero_pos: Vec2,
 }
 
@@ -222,14 +224,14 @@ impl WorldState {
         let mut terrain = terrain::load_or_generate(seed, MAP_WIDTH, MAP_HEIGHT);
         let bases = place_bases(&mut terrain, &mut rng);
 
-        // Towers and sellers prefer the peaks of a separate noise field.
+        // Towers on the mountains and where they even things out; sellers prefer the peaks of a
+        // separate noise field.
         let features = Noise::new(seed ^ 0xA5A5_5A5A_0F0F_F0F0);
         let mut taken: Vec<IVec2> = terrain.ramps().map(|(ramp, _)| ramp).collect();
-        let towers: Vec<Tower> =
-            pick_feature_tiles(&terrain, &bases, &features, &mut rng, TOWER_COUNT, false, &mut taken)
-                .into_iter()
-                .map(|tile| Tower { owner: Faction::Black, prev_owner: None, tile, garrison: armies::tower_garrison(&mut rng) })
-                .collect();
+        let towers: Vec<Tower> = place_towers(&terrain, &bases, &mut rng, &mut taken)
+            .into_iter()
+            .map(|tile| Tower { owner: Faction::Black, prev_owner: None, tile, garrison: armies::tower_garrison(&mut rng) })
+            .collect();
         let sellers: Vec<Seller> =
             pick_feature_tiles(&terrain, &bases, &features, &mut rng, UnitKind::ALL.len(), true, &mut taken)
                 .into_iter()
@@ -253,6 +255,7 @@ impl WorldState {
             sites,
             workers: Vec::new(),
             upgrades: Default::default(),
+            player_siege: None,
             hero_pos: Vec2::ZERO,
         };
         world.hero_pos = world.hero_home_pos();
@@ -409,6 +412,118 @@ fn place_bases(terrain: &mut TerrainMap, rng: &mut impl Rng) -> Vec<Base> {
         .collect()
 }
 
+/// Towers on the two biggest mountains...
+const MOUNTAINS_WITH_TOWERS: usize = 2;
+/// ...two on each, on the plateau top...
+const TOWERS_PER_MOUNTAIN: usize = 2;
+/// The other towers stand this far (tiles, min and max) from the castle that has the fewest
+/// towers within `FAIR_RADIUS` tiles, so every kingdom gets its share.
+const FAIR_DISTANCE: (i32, i32) = (8, 12);
+const FAIR_RADIUS: i32 = 16;
+
+/// Where the `TOWER_COUNT` towers stand:
+/// - two on each of the two biggest mountains (connected tiles of layer 2 and up), on the plateau
+///   top, as far apart as that mountain allows, so they sit on opposite sides of it;
+/// - the rest on open grass 8-12 tiles from the castle with the fewest towers near it (ties at
+///   random), so the kingdoms come out even.
+///
+/// Every tower can be walked to from your castle (ramps included), keeps off ramps, cliff faces and
+/// plateau edges, 6 tiles from castles and 5 from other towers. Fewer mountains (or no room on
+/// them) means more towers placed the fair way.
+fn place_towers(terrain: &TerrainMap, bases: &[Base], rng: &mut impl Rng, taken: &mut Vec<IVec2>) -> Vec<IVec2> {
+    let home = bases[0].spawn_tile();
+    let mut reachable_cache = std::collections::HashMap::new();
+    let mut reachable = |t: IVec2| *reachable_cache.entry(t).or_insert_with(|| terrain.find_path(home, t).is_some());
+    let spot = |t: IVec2, towers: &[IVec2]| {
+        terrain.is_walkable(t)
+            && !terrain.is_ramp(t)
+            && !terrain.is_ramp(t + IVec2::Y)
+            && !terrain.is_ramp_entry(t)
+            && !terrain.is_cliff_foot(t)
+            && !terrain.is_edge_art(t)
+            && bases.iter().all(|b| !b.contains(t) && chebyshev(b.centre(), t) >= FEATURE_BASE_DISTANCE)
+            && towers.iter().all(|o| chebyshev(*o, t) >= FEATURE_MIN_DISTANCE)
+    };
+    let mut towers: Vec<IVec2> = Vec::new();
+
+    // Mountains: connected tiles of layer 2 and up, biggest first.
+    let high = |t: IVec2| terrain.layer(t).is_some_and(|l| l >= 2);
+    let mut seen = std::collections::HashSet::new();
+    let mut mountains: Vec<Vec<IVec2>> = Vec::new();
+    for (start, _) in terrain.tiles() {
+        if !high(start) || !seen.insert(start) {
+            continue;
+        }
+        let (mut region, mut stack) = (Vec::new(), vec![start]);
+        while let Some(t) = stack.pop() {
+            region.push(t);
+            for d in [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
+                let n = t + d;
+                if high(n) && seen.insert(n) {
+                    stack.push(n);
+                }
+            }
+        }
+        mountains.push(region);
+    }
+    mountains.sort_by_key(|m| std::cmp::Reverse(m.len()));
+    for mountain in mountains.iter().take(MOUNTAINS_WITH_TOWERS) {
+        let mut candidates: Vec<IVec2> = mountain.iter().copied().filter(|t| spot(*t, &towers)).collect();
+        candidates.shuffle(rng);
+        candidates.truncate(200);
+        // The pair furthest apart: opposite sides of the mountain.
+        let mut pairs: Vec<(i32, IVec2, IVec2)> = Vec::new();
+        for (i, a) in candidates.iter().enumerate() {
+            for b in &candidates[i + 1..] {
+                let d = chebyshev(*a, *b);
+                if d >= FEATURE_MIN_DISTANCE {
+                    pairs.push((d, *a, *b));
+                }
+            }
+        }
+        pairs.sort_by_key(|p| std::cmp::Reverse(p.0));
+        let pick = pairs.into_iter().find(|(_, a, b)| reachable(*a) && reachable(*b)).map(|(_, a, b)| vec![a, b]);
+        // No room for two: one is better than none.
+        let pick = pick.or_else(|| candidates.iter().copied().find(|t| reachable(*t)).map(|t| vec![t]));
+        for t in pick.unwrap_or_default().into_iter().take(TOWERS_PER_MOUNTAIN) {
+            towers.push(t);
+        }
+    }
+
+    // The rest: near the castle that has the fewest towers around it.
+    let mut tries = 0;
+    while towers.len() < TOWER_COUNT && tries < 50 {
+        tries += 1;
+        let near = |b: &Base| towers.iter().filter(|t| chebyshev(b.centre(), **t) <= FAIR_RADIUS).count();
+        let fewest = bases.iter().map(near).min().unwrap_or(0);
+        let mut poorest: Vec<&Base> = bases.iter().filter(|b| near(b) == fewest).collect();
+        poorest.shuffle(rng);
+        let base = poorest[0];
+        let mut candidates: Vec<IVec2> = terrain
+            .tiles()
+            .map(|(t, _)| t)
+            .filter(|t| (FAIR_DISTANCE.0..=FAIR_DISTANCE.1).contains(&chebyshev(base.centre(), *t)))
+            .filter(|t| terrain.layer(*t) == Some(1) && spot(*t, &towers))
+            .collect();
+        candidates.shuffle(rng);
+        if let Some(t) = candidates.into_iter().find(|t| reachable(*t)) {
+            towers.push(t);
+        } else {
+            // Nothing fits around that castle: anywhere reachable, as far from other towers as possible.
+            let mut anywhere: Vec<IVec2> = terrain.tiles().map(|(t, _)| t).filter(|t| spot(*t, &towers)).collect();
+            anywhere.shuffle(rng);
+            anywhere.truncate(300);
+            anywhere.sort_by_key(|t| std::cmp::Reverse(towers.iter().map(|o| chebyshev(*o, *t)).min().unwrap_or(i32::MAX)));
+            match anywhere.into_iter().find(|t| reachable(*t)) {
+                Some(t) => towers.push(t),
+                None => break,
+            }
+        }
+    }
+    taken.extend(towers.iter().copied());
+    towers
+}
+
 /// Pick `count` tiles for towers or sellers: random candidates scored by the feature noise,
 /// kept away from bases and from each other.
 fn pick_feature_tiles(
@@ -532,6 +647,27 @@ mod tests {
             }
             assert!(world.terrain.walkable_at(world.hero_home_pos()));
             assert!(!world.land_united());
+        }
+    }
+
+    #[test]
+    fn towers_sit_on_the_mountains_and_even_out_the_rest() {
+        for seed in [1, 2, 3, 5, 11, 99] {
+            let world = WorldState::generate(seed);
+            let map = &world.terrain;
+            let home = world.home_base().spawn_tile();
+            assert_eq!(world.towers.len(), TOWER_COUNT, "seed {seed}");
+            for t in &world.towers {
+                assert!(map.find_path(home, t.tile).is_some(), "seed {seed}: tower at {} unreachable", t.tile);
+                assert!(world.bases.iter().all(|b| chebyshev(b.centre(), t.tile) >= FEATURE_BASE_DISTANCE));
+            }
+            for (i, a) in world.towers.iter().enumerate() {
+                for b in &world.towers[i + 1..] {
+                    assert!(chebyshev(a.tile, b.tile) >= FEATURE_MIN_DISTANCE, "seed {seed}: towers too close");
+                }
+            }
+            let up = world.towers.iter().filter(|t| map.layer(t.tile).is_some_and(|l| l >= 2)).count();
+            assert!(up >= 2, "seed {seed}: only {up} towers on mountains");
         }
     }
 

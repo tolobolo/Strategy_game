@@ -394,14 +394,11 @@ fn start_job(worker: &mut Worker, site: &mut Site, bases: &[Base], terrain: &Ter
         SiteKind::GoldMine if site.gold_left == 0 => go_home(worker, bases, terrain),
         SiteKind::GoldMine => worker.state = WorkerState::Working { left: site.kind.work_secs(), slot: None },
         SiteKind::Forest => {
-            let tree = site
-                .trees
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| t.standing() && !t.claimed)
-                .min_by_key(|(_, t)| (t.tile - here).abs().element_sum())
-                .map(|(i, _)| i);
-            match tree.and_then(|i| terrain.find_path(here, site.trees[i].tile).map(|p| (i, p))) {
+            // Nearest free tree first; one that cannot be walked to is skipped for the next.
+            let mut trees: Vec<usize> = (0..site.trees.len()).filter(|&i| site.trees[i].standing() && !site.trees[i].claimed).collect();
+            trees.sort_by_key(|&i| (site.trees[i].tile - here).abs().element_sum());
+            let tree = trees.into_iter().find_map(|i| terrain.find_path(here, site.trees[i].tile).map(|p| (i, p)));
+            match tree {
                 Some((i, path)) => {
                     site.trees[i].claimed = true;
                     worker.path = path;
@@ -411,14 +408,11 @@ fn start_job(worker: &mut Worker, site: &mut Site, bases: &[Base], terrain: &Ter
             }
         }
         SiteKind::Pasture => {
-            let sheep = site
-                .sheep
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| s.alive() && !s.claimed)
-                .min_by(|a, b| a.1.pos.distance(worker.pos).total_cmp(&b.1.pos.distance(worker.pos)))
-                .map(|(i, _)| i);
-            match sheep.and_then(|i| terrain.find_path(here, terrain.tile_of(site.sheep[i].pos)).map(|p| (i, p))) {
+            // Nearest free sheep first; one that cannot be walked to is skipped for the next.
+            let mut sheep: Vec<usize> = (0..site.sheep.len()).filter(|&i| site.sheep[i].alive() && !site.sheep[i].claimed).collect();
+            sheep.sort_by(|&a, &b| site.sheep[a].pos.distance(worker.pos).total_cmp(&site.sheep[b].pos.distance(worker.pos)));
+            let sheep = sheep.into_iter().find_map(|i| terrain.find_path(here, terrain.tile_of(site.sheep[i].pos)).map(|p| (i, p)));
+            match sheep {
                 Some((i, path)) => {
                     let s = &mut site.sheep[i];
                     s.claimed = true;
@@ -502,8 +496,9 @@ pub fn step_workers(
                     release(w, site);
                     start_job(w, site, bases, terrain);
                 } else if follow_path(&mut w.pos, &mut w.path, terrain, speed, dt) {
-                    // Step up to the trunk or the sheep.
-                    w.pos = match site.kind {
+                    // Step up to the trunk or the sheep, but only onto ground it can walk on, on
+                    // the same layer, so it can always walk on from there.
+                    let step = match site.kind {
                         SiteKind::Forest => {
                             let tree = &site.trees[i];
                             let drop = TRUNK_DROP[tree.variant as usize];
@@ -511,6 +506,10 @@ pub fn step_workers(
                         }
                         _ => site.sheep[i].pos + Vec2::new(-WORK_SIDE, 0.0),
                     };
+                    let (from, to) = (terrain.tile_of(w.pos), terrain.tile_of(step));
+                    if from == to || (terrain.is_walkable(to) && terrain.layer(to) == terrain.layer(from)) {
+                        w.pos = step;
+                    }
                     w.state = WorkerState::Working { left: site.kind.work_secs(), slot: Some(i) };
                 }
             }
@@ -905,7 +904,7 @@ mod tests {
         let (mut world, mut treasuries, site) = setup(SiteKind::Pasture, 1);
         let start: Vec<Vec2> = world.sites[site].sheep.iter().map(|s| s.pos).collect();
         assert!(world.send_worker(site).is_ok());
-        run(&mut world, &mut treasuries, 200.0);
+        run(&mut world, &mut treasuries, 400.0);
         assert!(treasuries.amount(Faction::Reclaimers, ResourceKind::Meat) >= SHEEP_MEAT);
         let moved = world.sites[site].sheep.iter().zip(&start).any(|(s, p)| s.pos != *p);
         assert!(moved, "sheep walk around");

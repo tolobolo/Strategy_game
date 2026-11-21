@@ -343,34 +343,30 @@ pub fn try_buy(
     true
 }
 
-/// Touching an enemy castle or a tower you do not own attacks it. An undefended one is simply taken.
-pub fn trigger_fights(
-    mut commands: Commands,
-    mut nearby: ResMut<Nearby>,
-    mut world: ResMut<WorldState>,
-    mut treasuries: ResMut<Treasuries>,
-    player_army: Res<PlayerArmy>,
-    mut next_state: ResMut<NextState<GameState>>,
+/// The end of your siege (`attack_panel::player_siege_tick`): fight the place's garrison together
+/// with any of its kingdom's armies within reach (`helpers_of`), or simply take it if nobody
+/// defends it.
+pub fn start_fight_at(
+    commands: &mut Commands,
+    next_state: &mut NextState<GameState>,
+    nearby: &mut Nearby,
+    world: &mut WorldState,
+    treasuries: &mut Treasuries,
+    player_army: &PlayerArmy,
+    place: Garrison,
 ) {
-    let (source, place) = match nearby.touch {
-        Some(Touch::Castle(i)) if !world.bases[i].owner.is_player() => (EncounterSource::Base(i), Garrison::Castle(i)),
-        Some(Touch::Tower(i)) if !world.towers[i].owner.is_player() => {
-            // An army in the middle of taking it blocks the door.
-            if world.tower_being_taken_by(i).is_some() {
-                return;
-            }
-            (EncounterSource::Tower(i), Garrison::Tower(i))
-        }
-        _ => return,
+    let source = match place {
+        Garrison::Castle(i) => EncounterSource::Base(i),
+        Garrison::Tower(i) => EncounterSource::Tower(i),
     };
     // Its kingdom's armies close by come to its defence (agents.md §1.5).
-    let helpers = helpers_of(&world, place);
+    let helpers = helpers_of(world, place);
     let mut enemy = world.enemy_army_for(source);
     for &i in &helpers {
         enemy.stacks.extend(world.armies[i].army.stacks.iter().copied());
     }
     if enemy.is_empty() {
-        let (loser, loot) = world.capture(source, &mut treasuries);
+        let (loser, loot) = world.capture(source, treasuries);
         treasuries.add(Faction::Reclaimers, loot);
         nearby.say(format!("Undefended! Taken from the {} (+{loot}g).", loser.name()));
         return;
@@ -380,7 +376,7 @@ pub fn trigger_fights(
         return;
     }
     if !helpers.is_empty() {
-        nearby.say_for(format!("The {} army defends its {} with the garrison!", place.owner(&world).name(), place.noun()), 6.0);
+        nearby.say_for(format!("The {} army defends its {} with the garrison!", place.owner(world).name(), place.noun()), 6.0);
     }
     commands.insert_resource(PendingEncounter { enemy, source, defending: None, helpers });
     next_state.set(GameState::Combat);

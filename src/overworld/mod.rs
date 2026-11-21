@@ -5,6 +5,7 @@
 
 pub mod ai;
 pub mod armies;
+pub mod attack_panel;
 pub mod army_panel;
 pub mod autoresolve;
 pub mod buildings;
@@ -124,6 +125,8 @@ impl Plugin for OverworldPlugin {
             .init_resource::<army_panel::ArmyPanelShown>()
             .init_resource::<work_panel::OpenWork>()
             .init_resource::<craft_panel::OpenCraft>()
+            .init_resource::<attack_panel::OpenAttack>()
+            .init_resource::<attack_panel::AttackShown>()
             .init_resource::<resources::PendingDeliveries>()
             .add_plugins(economy::EconomyPlugin)
             .add_systems(OnEnter(GameState::Overworld), spawn_overworld)
@@ -158,13 +161,18 @@ impl Plugin for OverworldPlugin {
                         .chain(),
                     refresh_building_visuals,
                     capture_visuals,
-                    interact::trigger_fights,
+                    attack_panel::player_siege_tick,
                     armies::roamer_encounters,
-                    (map::toggle_world_map, shop::toggle_shop, shop::wire_shop_buttons, shop::refresh_shop_status, shop::animate_ui_images).chain(),
-                    (castle_panel::toggle_castle, castle_panel::wire_castle_buttons, castle_panel::refresh_castle_panel, castle_panel::join_key).chain(),
-                    (work_panel::toggle_work, work_panel::wire_work_buttons, work_panel::refresh_work_panel).chain(),
-                    (craft_panel::toggle_craft, craft_panel::wire_craft_buttons, craft_panel::refresh_craft_panel).chain(),
-                    (army_panel::toggle_army, army_panel::refresh_army_panel, army_panel::wire_army_buttons, army_panel::refresh_army_slots).chain(),
+                    // The panels.
+                    (
+                        (map::toggle_world_map, shop::toggle_shop, shop::wire_shop_buttons, shop::refresh_shop_status, shop::animate_ui_images).chain(),
+                        (castle_panel::toggle_castle, castle_panel::wire_castle_buttons, castle_panel::refresh_castle_panel, castle_panel::join_key).chain(),
+                        (work_panel::toggle_work, work_panel::wire_work_buttons, work_panel::refresh_work_panel).chain(),
+                        (attack_panel::toggle_attack, attack_panel::refresh_attack_panel, attack_panel::wire_attack_buttons).chain(),
+                        (craft_panel::toggle_craft, craft_panel::wire_craft_buttons, craft_panel::refresh_craft_panel).chain(),
+                        (army_panel::toggle_army, army_panel::refresh_army_panel, army_panel::wire_army_buttons, army_panel::refresh_army_slots).chain(),
+                    )
+                        .chain(),
                     refresh_overworld_hud,
                     check_game_over,
                 )
@@ -760,7 +768,7 @@ fn refresh_overworld_hud(
             world.bases[i].garrison.slots(),
             world.bases[i].garrison.summary()
         ),
-        Some(Touch::Castle(i)) => format!("Castle of the {}. Touching it attacks!", world.bases[i].owner.name()),
+        Some(Touch::Castle(i)) => format!("Castle of the {}. Tab: look inside and attack", world.bases[i].owner.name()),
         Some(Touch::Shop { base, kind }) if world.bases[base].owner.is_player() => {
             let unit = kind.sells().unwrap();
             let craft = if kind == BuildingKind::House { "   C = crafting" } else { "" };
@@ -781,7 +789,7 @@ fn refresh_overworld_hud(
         ),
         Some(Touch::Tower(i)) => match world.tower_being_taken_by(i) {
             Some(taker) => format!("Tower of the {}: the {} are taking it right now, you cannot get in.", world.towers[i].owner.name(), taker.name()),
-            None => format!("Tower of the {}. Touching it attacks!", world.towers[i].owner.name()),
+            None => format!("Tower of the {}. Tab: look inside and attack", world.towers[i].owner.name()),
         },
         Some(Touch::Seller(i)) => {
             let unit = world.sellers[i].unit;
@@ -800,8 +808,16 @@ fn refresh_overworld_hud(
         None => "WASD: move.  E: your army.  M: world map.  Walk into buildings, towers and armies to use or attack them.  Red circles: bandits.  Ramps at the ends of cliffs lead up.".to_string(),
     };
 
-    // Every siege on your castles and towers, with the time left to JOIN.
+    // Your own siege, then every siege on your castles and towers, with the time left to JOIN.
     let mut text = String::new();
+    if let Some(siege) = world.player_siege {
+        text.push_str(&format!(
+            "YOU BESIEGE the {} of the {}: the fight starts in {} s. Stay close!\n",
+            siege.place.noun(),
+            siege.place.owner(&world).name(),
+            siege.left.ceil() as u32
+        ));
+    }
     for army in world.armies.iter().filter(|a| a.alive) {
         if let (armies::AiArmyState::Capturing(left), Some(place)) = (army.state, army.target)
             && place.owner(&world).is_player()

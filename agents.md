@@ -25,13 +25,13 @@ Tiny Swords free pack. Engine: **Bevy 0.19** (Rust).
 
 The hero walks in real time (WASD / arrows) over a generated map (see 1.6). On it you find:
 
-| Thing | Touching it does |
+| Thing | What you do there |
 |---|---|
 | **Your castle** | Opens the garrison: move units between the castle and the hero (1.4) |
 | **Your shop buildings** (House, Archery, Barracks, Monastery) | `R` hires one unit of that building's kind (1.2); `Tab` opens the shop |
 | **Idle sellers** | A lone unit standing in the wild. `R` hires one of its kind for the same price; `Tab` opens the shop |
-| **Enemy castle** | Starts a fight against its garrison. Win = the whole base is yours (1.5) |
-| **Tower** you do not own | Starts a fight against the units guarding it. Win = the tower pays you (1.3) |
+| **Enemy castle** | `Tab` opens the attack panel (§6.9); ATTACK starts a 10 s siege, then a fight against its garrison. Win = the whole base is yours (1.5) |
+| **Tower** you do not own | `Tab` opens the attack panel; ATTACK starts a 10 s siege, then a fight against its guard. Win = the tower pays you (1.3) |
 | **AI army** | Starts a fight against that army |
 | **Bandit squad** (red circle) | Walking into the circle starts a fight. Win = you take all their gold |
 
@@ -92,7 +92,13 @@ feed their armies (§1.5); Black only hoards it, so its loot grows while you wai
 
 ### 1.5 Fights and conquest
 
-- Fights happen on the combat grid (§3). The enemy army is whatever defends the thing you touched:
+- **Your sieges**: walking into an enemy tower or castle does nothing. `Tab` next to it opens the
+  attack panel (who defends it, which of their armies close by would join, your army, and how the
+  odds look); **ATTACK** (or `Enter`) starts your siege: **10 s** (`PLAYER_SIEGE_SECS`) of staying
+  next to it, shown on the HUD and the button. Walking away calls it off. Meanwhile their armies
+  may come to help (you are within 6 tiles); at zero you fight the garrison plus their armies within
+  5 tiles (`interact::start_fight_at`). One siege at a time; not while another kingdom is taking it.
+- Fights happen on the combat grid (§3). The enemy army is whatever defends the thing you besieged:
   the castle garrison, the tower guard, the AI army itself, or the bandit squad.
 - **Win against a castle**: the base and its buildings become yours; its garrison is gone; you loot
   half of that kingdom's gold. A kingdom without its castle raises no new armies.
@@ -101,7 +107,7 @@ feed their armies (§1.5); Black only hoards it, so its loot grows while you wai
 - **Win against bandits**: you take their gold; a new squad appears far from the hero after 45 s.
 - **Lose**: your army is gone, half your gold goes to the winner, the hero wakes up at your castle.
   The HUD shows a message about the outcome for a few seconds after every fight.
-- **Undefended** castles and towers are taken just by touching them.
+- **Undefended** castles and towers are taken at the end of the 10 s siege, without a fight (no army needed).
 - **Goal**: hold all four castles. A banner tells you when the land is united.
 - **Lose**: when you hold **no castle** any more (an AI army took your last one), a red "YOU
   LOST!" banner shows and the world stops (`check_game_over` pauses virtual time).
@@ -133,7 +139,8 @@ what it is doing, so you can watch it):
 | patrolling | nothing worth taking in reach: walking to random spots within 8 tiles of home |
 | CHASING YOU! | you (with an army) came within **6 tiles** inside its territory and you are not stronger than it: it runs at you (115 px/s); touching starts the fight |
 | fleeing home | you are more than **1.5 ×** its strength and within 6 tiles: it runs home |
-| hunting bandits | a bandit squad it can beat is within 6 tiles; on contact auto-resolve, the bandits' gold goes to the kingdom |
+| hunting bandits | a bandit squad it can beat is within 6 tiles; on contact they fight (below), the bandits' gold goes to the kingdom if it wins |
+| fighting the Red army… Ns / fighting bandits… Ns | **fights take time**: two armies of different kingdoms that touch, or an army that catches bandits, stand still and play their attack animation at each other for **6 s** (`FIGHT_SECS`), the bandits' label says "fighting!"; then auto-resolve decides it and the loser dies (an army becomes a ghost). If one of them is beaten by you meanwhile, the other walks on |
 | hunting your workers | one of your worker Pawns is within 6 tiles inside its territory; on contact the worker (and its Pawn) is killed |
 | coming to help its tower / castle, guarding… Ns | one of its places is threatened (you with an army within **6 tiles** of it, or another kingdom besieging it): its nearest free army goes there and guards it for 15 s |
 | besieging… Ns / taken! / returning home / resting… Ns / gathering troops… | as before |
@@ -158,8 +165,8 @@ what it is doing, so you can watch it):
   and weak first. Only places within reach of its territory count, and none another kingdom is
   already besieging. A full castle (25–30 units) is usually too strong, so castles fall mostly after
   their owner has emptied them.
-- **Armies meeting**: two AI armies of different kingdoms within touching distance (40 px) fight by
-  auto-resolve; the loser is destroyed (a ghost).
+- **Armies meeting**: two AI armies of different kingdoms within touching distance (40 px) stop and
+  fight for 6 s, then auto-resolve decides it; the loser is destroyed (a ghost).
 - **Spending gold** (`overworld/ai.rs`): every **5 s** each AI kingdom that holds its own castle buys
   up to 3 units into its castle garrison, at the same prices as the player, while it can afford one
   and the castle has room (30): Warrior 4, Archer 3, Lancer 2, Monk 1 (weights; Pawns are not bought).
@@ -326,8 +333,20 @@ plateau edge.
 
 Bases take four patch-sized (6×5) areas, at any tile, that are entirely layer-1 grass and clear of
 ramps (`flat_spots`), spaced 3 patches apart (`patch_gap`, relaxed
-if needed). Towers and sellers keep 6 tiles from bases and 5 from each other and never stand on a
-ramp or a cliff foot. Bandits spawn at least 10 tiles from your base.
+if needed).
+
+**Towers** (`world::place_towers`, 6 of them, Black with 3–5 Warriors + 2–4 Archers):
+- **two on each of the two biggest mountains** (connected tiles of layer 2 and up), on the
+  plateau top, the pair as far apart as that mountain allows, so they sit on **opposite sides** of it;
+- **the rest on open grass 8–12 tiles from the castle that has the fewest towers within 16 tiles**
+  (ties at random), so the kingdoms come out even; if nothing fits there, anywhere reachable as far
+  from the other towers as possible;
+- every tower can be **walked to from your castle** (ramps included), keeps off ramps, ramp
+  entries, cliff faces and plateau edges, 6 tiles from castle centres and 5 from other towers. A map
+  with one mountain (or no room on top) gets more towers placed the fair way.
+
+Sellers keep 6 tiles from bases and 5 from each other and towers (noise peaks, grass only) and
+never stand on a ramp or a cliff foot. Bandits spawn at least 10 tiles from your base.
 
 **Decorations** (`WorldState.decorations`, purely visual, animated where the sheet has frames):
 trees (`resources/wood/trees/tree1..4`, denser where a moisture noise is high), bushes and rocks on
@@ -571,6 +590,7 @@ cleans them up automatically.
 | `src/overworld/work_panel.rs` | – | The `Tab` work panel at a site (§6.7) |
 | `src/upgrades.rs` + `assets/upgrades.ron` | – | The crafting tree: data, what you bought, the effect getters (§1.8). Tests live here |
 | `src/overworld/craft_panel.rs` | – | The `C` crafting panel at your House (§6.8) |
+| `src/overworld/attack_panel.rs` | – | The `Tab` attack panel at an enemy tower or castle and your 10 s siege (§6.9) |
 | `src/ui.rs` | – | Shared UI pieces (§6.2): nine-slice panels, coin / sword stats, ribbons, finish banner |
 | `src/overworld/castle_panel.rs` | – | The `Tab` castle panel (§6.3): avatar ribbon, garrison / hero counts, TAKE / STORE |
 | `src/overworld/army_panel.rs` | – | The `E` army page (§6.4): troop list with avatars, preview and stats |
@@ -643,7 +663,7 @@ in `combat/actions.rs`). That keeps the rules in one place.
 
 Controls: click a lit tile = Move, click an enemy stack = Strike, click an own stack = Merge,
 `1` = Unstack, `3` = Shield up, `Space` = End turn. There is no way to leave a battle early.
-Overworld keys: `Tab` shop / castle panel, `E` army page, `R` quick buy, `M` map, `1`–`5` castle transfer, `J` join a siege (castle panel open), `1` / `2` send / recall a worker (work panel open), `C` crafting at your House (arrows select, `Enter` buys; the hero stands still while it is open).
+Overworld keys: `Tab` shop / castle panel, `E` army page, `R` quick buy, `M` map, `1`–`5` castle transfer, `J` join a siege (castle panel open), `1` / `2` send / recall a worker (work panel open), `C` crafting at your House (arrows select, `Enter` buys; the hero stands still while it is open), `Tab` + `Enter` at an enemy tower or castle: attack panel and siege.
 
 ### 4.6 Schedule
 
@@ -922,6 +942,16 @@ the **selected upgrade on paper on the right**.
 - **Footer**: what you have of each, and the last message.
 - `C`, Esc, the X or walking away from the House close it.
 - The screenshot tool's last shot opens it at your House with a few upgrades bought.
+
+### 6.9 Attack panel (`overworld/attack_panel.rs`)
+
+`Tab` next to a tower or castle you do not own (Tab, Esc, the X or walking away close it). Built
+like the army page (§6.4) on the wood table: **left** "Defending the tower/castle" with one row per
+kind (avatar in the owner's colour + "Kind xN"), and "+ Red army close by (joins)" when their
+armies are within 5 tiles; **right** "Your army" with blue avatars. Footer: the odds ("They look
+weaker / stronger than you", "An even fight", "Undefended"), why you cannot attack (no army, being
+taken), and the red **ATTACK Enter** button, which reads **BESIEGING Ns** while your siege runs. The
+panel rebuilds itself when the defenders or your army change.
 
 ### 6.6 Mouse cursor (`src/cursor.rs`)
 
