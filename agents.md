@@ -136,14 +136,13 @@ what it is doing, so you can watch it):
 | Label | What it means |
 |---|---|
 | marching to a tower / castle | going to besiege a target (see choosing a target) |
-| reinforcing its tower | taking units to one of its towers that is not full: hands over units up to **10**; if the army drops under 5 units it goes home, refills from the castle and comes back. **Towers are filled before anything new is attacked**, which slows kingdoms down |
+| reinforcing its castle / tower | taking units to one of its places that is not full: **captured castles first** (up to its castle size, 30 or 40), then towers (up to **10**), nearest first; if the army drops under 5 units it goes home, refills and comes back. Its main castle is never refilled this way (armies are raised from it; it fills by buying). **Places are filled before anything new is attacked**, which slows kingdoms down |
 | patrolling | nothing worth taking in reach: walking to random spots within 8 tiles of home |
-| CHASING YOU! | you (with an army) came within **6 tiles** inside its territory and you are not stronger than it: it runs at you (115 px/s); touching starts the fight |
-| fleeing home | you are more than **1.5 ×** its strength and within 6 tiles: it runs home |
-| hunting bandits | a bandit squad it can beat is within 6 tiles; on contact they fight (below), the bandits' gold goes to the kingdom if it wins |
+| CHASING YOU! | you (with an army) came within **6 tiles** inside its territory (or within 10 tiles of a castle it guards) and it **can take you** (you are not stronger than it): it runs at you (115 px/s); touching starts the fight. If it cannot take you it simply goes on with what it was doing (armies never run from you) |
+| hunting bandits | a bandit squad it can beat is within 6 tiles (a **patrolling** army looks **10 tiles** far and also takes on squads up to 1.5 × its strength, so patrols clear the bandits out); on contact they fight (below), the bandits' gold goes to the kingdom if it wins |
 | fighting the Red army… Ns / fighting bandits… Ns | **fights take time**: two armies of different kingdoms that touch, or an army that catches bandits, stand still and play their attack animation at each other for **6 s** (`FIGHT_SECS`), the bandits' label says "fighting!"; then auto-resolve decides it and the loser dies (an army becomes a ghost). If one of them is beaten by you meanwhile, the other walks on |
 | hunting your workers | one of your worker Pawns is within 6 tiles inside its territory; on contact the worker (and its Pawn) is killed |
-| coming to help its tower / castle, guarding… Ns | one of its places is threatened (you with an army within **6 tiles** of it, or another kingdom besieging it): its nearest free army goes there and guards it for 15 s |
+| coming to help its tower / castle, guarding… Ns | one of its places is threatened: an army goes there and guards it for **5 s** (again and again while the alarm lasts). **You (with an army) within 10 tiles of one of its castles calls every free army of that kingdom within 28 tiles to that castle**, where each attacks you if it can take you; a threatened tower calls only its nearest army. **A siege (yours with the 10 s countdown, or another kingdom's) comes before everything**: even an army that is chasing you, hunting or running from you turns round to defend; **castle sieges before tower sieges**. You merely passing by only calls walking or patrolling armies |
 | besieging… Ns / taken! / returning home / resting… Ns / gathering troops… | as before |
 
 - **Territory**: a kingdom's territory is everything within **8 tiles** of a castle or tower it
@@ -171,8 +170,17 @@ what it is doing, so you can watch it):
   join that assault. They fight the garrison one after another (each fight weakens it), and the
   siege runs faster with every army at it.
 - **Random guard duty**: before marching on a new target, an army instead goes to guard one of
-  its own places for 20–40 s half of the time (`IDLE_GUARD_CHANCE`), labelled "guarding… Ns":
+  its own places for 4–7 s half of the time (`IDLE_GUARD_CHANCE`), labelled "guarding… Ns":
   kingdoms do not attack non-stop.
+- **Speeds**: marching and patrolling **80 px/s**; hunting and guarding **115**; **hurrying to a
+  siege 160** (`SIEGE_RUSH_SPEED`): defenders of a place under siege (yours or another kingdom's)
+  and fellow armies joining their kingdom's siege. Your hero walks 260.
+- **Gathering troops**: an empty army waits at its castle and tries every 5 s to raise a new army,
+  which needs 10 units there (5 stay, at least 5 go). Castles fill by buying (up to 3 units per
+  castle every 5 s, as long as the gold lasts: about 1.5 units per 30 s for a castle with 3 towers),
+  so this usually takes 1–2 minutes, 3+ from an empty castle.
+- **Resting away from home**: an army that rests somewhere that is no longer its home (you took
+  that castle) first walks to the castle its kingdom still holds.
 - **Armies meeting**: two AI armies of different kingdoms within touching distance (40 px) stop and
   fight for 6 s, then auto-resolve decides it; the loser is destroyed (a ghost).
 - **Spending gold** (`overworld/ai.rs`): every **5 s** each AI kingdom first **crafts** its next
@@ -199,8 +207,8 @@ what it is doing, so you can watch it):
 - **Testing the balance**: `cargo test conquest_report -- --ignored --nocapture` plays 60 minutes
   of AI on seeds 1–8 (with income, crafting, ghosts and respawns, you doing nothing) and prints every
   castle that changes hands and whether one kingdom took everything. Last run: one kingdom took
-  every castle on 3 seeds (yours, unattended, fell after 14–37 min), the others still had 2–3
-  kingdoms after an hour.
+  every AI castle on 5 seeds (within 8–20 min); your castle, unattended, fell on most seeds after
+  30–52 min; on the other seeds two or three kingdoms were still fighting after an hour.
 
 **Ghosts** (`AiArmy::die`, `ghosts_fly_home`, `sync_ghosts`): however an AI army is destroyed (by
 you, another kingdom, bandits or a lost siege), it turns into a ghost knight
@@ -1015,7 +1023,7 @@ with → hand + frame; any other tile or stack → no sign.
 - [x] Losing your last castle loses the game
 - [x] Resources: gold mines, forests (wood), sheep pastures (meat) on the map; Tab on one to send worker Pawns from the castle, who walk there, work and carry the load home
 - [x] Crafting tree at the House: 13 upgrades bought with wood + meat + gold (army and castle size, siege time, income, workers, prices, healing)
-- [x] AI armies keep to their territory, chase you, flee from you, hunt bandits and your workers, defend their places (labels say what they do)
+- [x] AI armies keep to their territory, chase you when they can take you, hunt bandits and your workers, defend their places (labels say what they do)
 - [ ] Bandits hunt workers; AI kingdoms send workers too
 - [x] AI kingdoms grow visibly: crafting ladder (bigger / more armies, bigger castles), conquerors inherit the army slots, castles stormed together; one kingdom can win
 - [ ] Kingdoms that differ (unit mix, army count, speed)

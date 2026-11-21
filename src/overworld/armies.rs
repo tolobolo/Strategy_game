@@ -27,6 +27,9 @@ pub const TOWER_LEAVE_SECS: f32 = 1.5;
 pub const AI_ARMY_SPEED: f32 = 80.0;
 /// Hunting, defending and fleeing armies hurry.
 pub const HUNT_SPEED: f32 = 115.0;
+/// Armies hurrying to a siege (defenders of a besieged place, or fellow armies joining their
+/// kingdom's siege) run this fast.
+pub const SIEGE_RUSH_SPEED: f32 = 160.0;
 /// A beaten AI army's ghost flies home this fast, straight over water, cliffs and layers...
 pub const GHOST_SPEED: f32 = 140.0;
 /// ...then waits this long at its castle before a new army (drawn from the garrison) sets out.
@@ -35,6 +38,12 @@ pub const GHOST_WAIT_SECS: f32 = 15.0;
 const GHOST_SCALE: f32 = 0.3;
 /// An army that came home rests this long before drawing a new army from the garrison.
 pub const AI_REST_SECS: f32 = 10.0;
+/// An empty army gathers troops at its castle this long; if the garrison still cannot fill it,
+/// it gets a free army (like the starting ones).
+pub const FREE_ARMY_SECS: f32 = 20.0;
+/// An army below this share of its full size, with units left, restocks at a seller with its
+/// kingdom's gold when one is closer than its home castle.
+const RESTOCK_BELOW: f32 = 0.6;
 /// An AI army skips towers whose guard is stronger than this × its own strength.
 pub const AI_ATTACK_RATIO: f32 = 0.8;
 /// An army with fewer units than this goes home after a capture, rests `AI_REST_SECS` and
@@ -60,18 +69,23 @@ pub const SIGHT_TILES: f32 = 6.0;
 /// A hunt is given up when the prey gets this far away (tiles), or after `HUNT_SECS`.
 const GIVE_UP_TILES: f32 = 10.0;
 const HUNT_SECS: f32 = 20.0;
-/// You are this much stronger than an army: it runs home instead of fighting.
-const FLEE_RATIO: f32 = 1.5;
 /// An army hunts you or bandits only when they are at most this strong compared with it.
 const HUNT_RATIO: f32 = 1.0;
-/// Your hero this close (tiles) to a kingdom's tower or castle sounds the alarm there.
+/// Your hero this close (tiles) to a kingdom's tower sounds the alarm there...
 const ALERT_TILES: f32 = 6.0;
-/// A defending army guards the place this long after reaching it.
-const GUARD_SECS: f32 = 15.0;
+/// ...and this close to one of its castles: then all its armies in reach gather at the castle.
+const CASTLE_ALERT_TILES: f32 = 10.0;
+/// A defending army guards the place this long after reaching it (it keeps guarding while the
+/// alarm lasts).
+const GUARD_SECS: f32 = 5.0;
+/// A patrolling army spots bandits this far away (tiles) and takes on squads up to this strong
+/// compared with itself: patrols clear the bandits out.
+const PATROL_BANDIT_SIGHT: f32 = 10.0;
+const PATROL_BANDIT_RATIO: f32 = 1.5;
 /// Before marching on a new target an army takes guard duty at one of its own places instead this
 /// often, for a random time in `IDLE_GUARD_SECS`: kingdoms do not attack non-stop.
 const IDLE_GUARD_CHANCE: f64 = 0.5;
-const IDLE_GUARD_SECS: (f32, f32) = (20.0, 40.0);
+const IDLE_GUARD_SECS: (f32, f32) = (4.0, 7.0);
 /// AI armies within this many tiles of their own tower or castle join the fight when you attack it.
 pub const HELP_TILES: f32 = 5.0;
 /// A fight between two armies, or an army and bandits, lasts this long before it is decided.
@@ -110,10 +124,11 @@ pub enum AiArmyState {
     Hunting(Prey),
     /// Going to (and then guarding for `left` seconds) one of its own places that is threatened.
     Defending { place: Garrison, left: f32 },
-    /// You are much stronger: running home.
-    Fleeing,
     /// Locked in a fight; it is decided (auto-resolve) when `left` runs out.
     Fighting { foe: Foe, left: f32 },
+    /// Walking to an idle seller (index into `WorldState::sellers`) to buy units with its
+    /// kingdom's gold.
+    Restocking(usize),
     /// Besieging its target tower or castle; seconds until it is auto-resolved.
     Capturing(f32),
     /// Watching the capture animation; seconds until it walks on.
@@ -304,7 +319,10 @@ fn army_text(army: &AiArmy, world: &WorldState) -> String {
     let faction = army.faction;
     // Home with its units in the castle: waiting for enough troops for a new army.
     if army.army.is_empty() {
-        return format!("{} army\ngathering troops...", faction.name());
+        return match army.state {
+            AiArmyState::Resting(left) => format!("{} army\ngathering troops... {}s", faction.name(), left.ceil() as u32),
+            _ => format!("{} army\ngathering troops...", faction.name()),
+        };
     }
     let doing = match army.state {
         AiArmyState::Walking => match army.target {
@@ -318,13 +336,13 @@ fn army_text(army: &AiArmy, world: &WorldState) -> String {
         AiArmyState::Hunting(Prey::Worker(_)) => "hunting your workers".to_string(),
         AiArmyState::Defending { place, .. } if !army.path.is_empty() => format!("coming to help its {}", place.noun()),
         AiArmyState::Defending { left, .. } => format!("guarding... {}s", left.ceil() as u32),
-        AiArmyState::Fleeing => "fleeing home".to_string(),
         AiArmyState::Fighting { foe: Foe::Army(j), left } => {
             format!("fighting the {} army... {}s", world.armies[j].faction.name(), left.ceil() as u32)
         }
         AiArmyState::Fighting { foe: Foe::Bandits(_), left } => format!("fighting bandits... {}s", left.ceil() as u32),
         AiArmyState::Capturing(left) => format!("besieging... {}s", left.ceil() as u32),
         AiArmyState::Leaving(_) => "taken!".to_string(),
+        AiArmyState::Restocking(_) => "buying units at a seller".to_string(),
         AiArmyState::Returning => "returning home".to_string(),
         AiArmyState::Resting(left) => format!("resting... {}s", left.ceil() as u32),
     };
@@ -410,15 +428,76 @@ pub fn choose_target(
         .map(|(_, place, path)| (place, path))
 }
 
+/// A kingdom's main castle: its own home castle while it holds it, otherwise the castle it holds
+/// nearest to `near`. `None` = it holds no castle at all (the kingdom is beaten). Armies rest,
+/// refill and are raised there, and ghosts fly there.
+pub fn home_castle(faction: Faction, bases: &[Base], terrain: &TerrainMap, near: Vec2) -> Option<usize> {
+    let own = bases.iter().position(|b| b.home == faction && b.owner == faction);
+    own.or_else(|| {
+        (0..bases.len())
+            .filter(|&b| bases[b].owner == faction)
+            .min_by(|&a, &b| {
+                let d = |i: usize| terrain.world_pos(bases[i].spawn_tile()).distance(near);
+                d(a).total_cmp(&d(b))
+            })
+    })
+}
+
 /// The nearest tower of `faction` that is not full (`TOWER_SLOTS`), and the path there. Armies
 /// fill their kingdom's towers before they attack anything new.
-pub fn choose_reinforce(faction: Faction, here: IVec2, towers: &[Tower], terrain: &TerrainMap) -> Option<(Garrison, Vec<IVec2>)> {
-    towers
+/// The place an army should take units to: its kingdom's castles that are not full (`castle_cap`)
+/// first, then towers that are not full (`TOWER_SLOTS`), nearest first. The main castle (`home`)
+/// is left out: armies are raised from it, and it fills up by buying. Armies fill their kingdom's
+/// places before they attack anything new.
+#[allow(clippy::too_many_arguments)]
+pub fn choose_reinforce(
+    faction: Faction,
+    here: IVec2,
+    towers: &[Tower],
+    bases: &[Base],
+    terrain: &TerrainMap,
+    home: Option<usize>,
+    castle_cap: u32,
+) -> Option<(Garrison, Vec<IVec2>)> {
+    let castles = (0..bases.len())
+        .filter(|&i| bases[i].owner == faction && Some(i) != home && bases[i].garrison.slots() < castle_cap)
+        .map(Garrison::Castle);
+    let towers_ = (0..towers.len())
+        .filter(|&i| towers[i].owner == faction && towers[i].garrison.slots() < TOWER_SLOTS)
+        .map(Garrison::Tower);
+    castles
+        .chain(towers_)
+        .filter_map(|p| terrain.find_path(here, p.tile_in(towers, bases)).map(|path| (p, path)))
+        .min_by_key(|(p, path)| (matches!(p, Garrison::Tower(_)), path.len()))
+}
+
+/// The nearest seller an army at `here` could restock at with `gold` (not the Pawn seller: the AI
+/// does not use Pawns), if it is closer than its home castle gate `home`: index and path.
+fn seller_nearer_than_home(
+    here: IVec2,
+    home: Option<IVec2>,
+    sellers: &[crate::overworld::world::Seller],
+    gold: u32,
+    terrain: &TerrainMap,
+) -> Option<(usize, Vec<IVec2>)> {
+    let home_len = home.and_then(|h| terrain.find_path(here, h)).map_or(usize::MAX, |p| p.len());
+    sellers
         .iter()
         .enumerate()
-        .filter(|(_, t)| t.owner == faction && t.garrison.slots() < TOWER_SLOTS)
-        .filter_map(|(i, t)| terrain.find_path(here, t.tile).map(|p| (Garrison::Tower(i), p)))
+        .filter(|(_, s)| s.unit != UnitKind::Pawn && gold >= s.unit.price())
+        .filter_map(|(i, s)| terrain.find_path(here, s.tile).map(|p| (i, p)))
+        .filter(|(_, p)| p.len() < home_len)
         .min_by_key(|(_, p)| p.len())
+}
+
+/// A free army, like the starting ones, no bigger than the kingdom's crafted army size.
+fn free_army(faction: Faction, size: u32, rng: &mut impl Rng) -> Army {
+    let mut army = random_ai_army(faction, rng);
+    let over = army.slots().saturating_sub(size);
+    if over > 0 {
+        army.split_off_fraction(over as f32 / army.slots() as f32);
+    }
+    army
 }
 
 /// Move up to `n` units from `from` to `to`, stack by stack. Returns how many moved.
@@ -454,18 +533,40 @@ struct Seen<'a> {
     workers: &'a [(usize, Vec2)],
     /// Places being besieged right now, and by whom.
     busy: &'a [(Garrison, Faction)],
-    /// The place this army was picked to defend, and whether you (rather than another kingdom) are the threat.
-    defend: Option<(Garrison, bool)>,
+    /// The place this army was picked to defend.
+    defend: Option<Alarm>,
     /// Strength of all this army's kingdom's armies together (they storm castles together).
     kingdom: f32,
     /// A castle a fellow army of this kingdom is marching on or besieging: join that assault.
     assault: Option<Garrison>,
+    /// How many units this kingdom's castles hold (crafted).
+    castle_cap: u32,
+    /// How big this kingdom's armies may be (crafted).
+    army_cap: u32,
+    /// This kingdom's gold, for restocking at sellers.
+    gold: u32,
+    /// The idle sellers on the map.
+    sellers: &'a [crate::overworld::world::Seller],
 }
 
-/// Which army defends which threatened place. A kingdom's tower or castle is threatened when you
-/// (with an army) come within `ALERT_TILES`, or another kingdom besieges it; its nearest free army
-/// within reach goes to guard it. Returns, per army, the place and whether you are the threat.
-fn assign_defenders(world: &WorldState, hero_pos: Vec2, player_armed: bool, busy: &[(Garrison, Faction)]) -> Vec<Option<(Garrison, bool)>> {
+/// A threatened place an army was picked to defend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Alarm {
+    place: Garrison,
+    /// You are the threat (rather than another kingdom): the HUD tells you they are coming.
+    by_hero: bool,
+    /// A real siege (yours, or another kingdom's): defending it comes before everything else,
+    /// even running from you or a hunt.
+    siege: bool,
+}
+
+/// Which army defends which threatened place. A kingdom's tower or castle is threatened when it is
+/// **besieged** (by you or another kingdom) or when you (with an army) come within `ALERT_TILES`;
+/// its nearest army within reach goes to guard it. For a siege any army that is walking,
+/// patrolling, hunting, fleeing or guarding answers the call; for you just passing by, only one
+/// that is walking or patrolling. Castle sieges are handled first, then tower sieges, so the
+/// nearest army goes to a besieged castle even if a tower is under siege too.
+fn assign_defenders(world: &WorldState, hero_pos: Vec2, player_armed: bool, busy: &[(Garrison, Faction)]) -> Vec<Option<Alarm>> {
     let mut out = vec![None; world.armies.len()];
     let places = world
         .bases
@@ -474,36 +575,62 @@ fn assign_defenders(world: &WorldState, hero_pos: Vec2, player_armed: bool, busy
         .map(|(i, b)| (Garrison::Castle(i), b.owner))
         .chain(world.towers.iter().enumerate().map(|(i, t)| (Garrison::Tower(i), t.owner)))
         .filter(|(_, owner)| !owner.is_player() && *owner != Faction::Black);
-    for (place, owner) in places {
+    let mut alarms: Vec<(Garrison, Faction, Alarm)> = places
+        .filter_map(|(place, owner)| {
+            let at = world.terrain.world_pos(place.tile(world));
+            let you_besiege = world.player_siege.is_some_and(|s| s.place == place);
+            let they_besiege = busy.iter().any(|(p, f)| *p == place && *f != owner);
+            let alert = if matches!(place, Garrison::Castle(_)) { CASTLE_ALERT_TILES } else { ALERT_TILES };
+            let near = player_armed && at.distance(hero_pos) <= alert * TILE;
+            let siege = you_besiege || they_besiege;
+            (siege || near).then_some((place, owner, Alarm { place, by_hero: you_besiege || (near && !they_besiege), siege }))
+        })
+        .collect();
+    // Castle sieges first, then tower sieges, then you just passing by.
+    alarms.sort_by_key(|(place, _, alarm)| (!alarm.siege, matches!(place, Garrison::Tower(_))));
+    for (place, owner, alarm) in alarms {
         let at = world.terrain.world_pos(place.tile(world));
-        let by_hero = player_armed && at.distance(hero_pos) <= ALERT_TILES * TILE;
-        let besieged = busy.iter().any(|(p, f)| *p == place && *f != owner);
-        if !by_hero && !besieged {
-            continue;
-        }
         let free = |a: &AiArmy| {
-            matches!(a.state, AiArmyState::Walking | AiArmyState::Patrolling)
-                || matches!(a.state, AiArmyState::Defending { place: p, .. } if p == place)
+            let any_free = matches!(a.state, AiArmyState::Walking | AiArmyState::Patrolling);
+            let answers_siege = alarm.siege && matches!(a.state, AiArmyState::Hunting(_) | AiArmyState::Defending { .. });
+            any_free || answers_siege || matches!(a.state, AiArmyState::Defending { place: p, .. } if p == place)
         };
-        let reach = (TERRITORY_TILES + TARGET_REACH_TILES) as f32 * TILE;
-        let nearest = world
+        // A castle calls every free army of its kingdom from far around (they gather there); a
+        // tower only its nearest one.
+        let castle = matches!(place, Garrison::Castle(_));
+        let reach = if castle { TERRITORY_TILES + CASTLE_REACH_TILES } else { TERRITORY_TILES + TARGET_REACH_TILES } as f32 * TILE;
+        let mut candidates: Vec<(usize, f32)> = world
             .armies
             .iter()
             .enumerate()
             .filter(|(i, a)| a.alive && a.faction == owner && !a.army.is_empty() && free(a) && out[*i].is_none())
             .map(|(i, a)| (i, a.pos.distance(at)))
             .filter(|(_, d)| *d <= reach)
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((i, _)) = nearest {
-            out[i] = Some((place, by_hero));
+            .collect();
+        candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
+        for (i, _) in candidates.into_iter().take(if castle { usize::MAX } else { 1 }) {
+            out[i] = Some(alarm);
         }
     }
     out
 }
 
+/// Send `army` to guard `alarm.place` (unless it already is). Returns the HUD message when you are
+/// the threat.
+fn defend(army: &mut AiArmy, alarm: Alarm, path: &[IVec2]) -> Option<String> {
+    if matches!(army.state, AiArmyState::Defending { place: p, .. } if p == alarm.place) {
+        return None;
+    }
+    army.state = AiArmyState::Defending { place: alarm.place, left: GUARD_SECS };
+    army.target = None;
+    army.hunted = 0.0;
+    army.path = path.to_vec();
+    alarm.by_hero.then(|| format!("The {} army comes to defend its {}!", army.faction.name(), alarm.place.noun()))
+}
+
 /// One think of an army in a free state (walking, patrolling, hunting, defending, fleeing), in
-/// this order: keep at a hunt while it makes sense; run home from you if you are much stronger;
-/// attack you inside its territory if you are not too strong; hunt bandits it can beat; hunt your
+/// this order: defend one of its places under siege (before anything else); keep at a hunt while
+/// it makes sense; attack you inside its territory (or near a castle it guards) if it can take you; hunt bandits it can beat; hunt your
 /// workers in its territory; guard a threatened place it was picked for; else march on a target
 /// in reach, or patrol near home. Returns a message for the HUD when it starts something you
 /// should know about.
@@ -527,6 +654,27 @@ fn decide(
     let reach = TERRITORY_TILES + TARGET_REACH_TILES;
     let in_territory = |tile: IVec2| territory_distance(faction, tile, towers, bases) <= TERRITORY_TILES;
 
+    // A siege on one of its places comes before everything, even a hunt.
+    if let Some(alarm) = seen.defend.filter(|a| a.siege) {
+        return defend(army, alarm, &path_to(alarm.place.tile_in(towers, bases)));
+    }
+    // On its way to a seller: keep going.
+    if matches!(army.state, AiArmyState::Restocking(_)) {
+        return None;
+    }
+    // Worn down but with units left: restock at a seller with the kingdom's gold if one is closer
+    // than home.
+    let slots = army.army.slots();
+    if slots > 0
+        && (slots as f32) < RESTOCK_BELOW * seen.army_cap as f32
+        && !matches!(army.state, AiArmyState::Hunting(_))
+        && let Some((s, path)) = seller_nearer_than_home(here, Some(home), seen.sellers, seen.gold, terrain)
+    {
+        army.state = AiArmyState::Restocking(s);
+        army.target = None;
+        army.path = path;
+        return None;
+    }
     // Keep at a hunt until the prey is gone or far, it took too long, or we strayed too far.
     if let AiArmyState::Hunting(prey) = army.state {
         let target = match prey {
@@ -551,27 +699,27 @@ fn decide(
             }
         }
     }
-    // Running home: keep running.
-    if army.state == AiArmyState::Fleeing && !army.path.is_empty() {
-        return None;
-    }
-    // You are much stronger and close: run home.
-    if seen.player_armed && near(seen.hero_pos) && seen.player_strength > FLEE_RATIO * own {
-        army.state = AiArmyState::Fleeing;
-        army.target = None;
-        army.path = path_to(home);
-        return None;
-    }
-    // You inside its territory and not too strong: attack.
-    if seen.player_armed && near(seen.hero_pos) && in_territory(here) && seen.player_strength <= HUNT_RATIO * own {
+    // You inside its territory (or near a castle it guards) and it can take you: attack. If it
+    // cannot, it simply goes on with what it was doing.
+    let guarding_castle = matches!(army.state, AiArmyState::Defending { place: Garrison::Castle(_), .. });
+    let spots_you = near(seen.hero_pos) || (guarding_castle && seen.hero_pos.distance(pos) <= CASTLE_ALERT_TILES * TILE);
+    if seen.player_armed && spots_you && (in_territory(here) || guarding_castle) && seen.player_strength <= HUNT_RATIO * own {
         army.state = AiArmyState::Hunting(Prey::Hero);
         army.hunted = 0.0;
         army.target = None;
         army.path = path_to(terrain.tile_of(seen.hero_pos));
         return Some(format!("The {} army has seen you and attacks!", faction.name()));
     }
-    // Bandits close by that it can beat.
-    if let Some(b) = seen.bandits.iter().filter(|b| near(b.1) && b.2 <= HUNT_RATIO * own).min_by(|a, b| closest(&a.1, &b.1)) {
+    // Bandits close by that it can beat; a patrol looks further and takes on stronger squads.
+    let patrolling = army.state == AiArmyState::Patrolling;
+    let (bandit_sight, bandit_ratio) =
+        if patrolling { (PATROL_BANDIT_SIGHT * TILE, PATROL_BANDIT_RATIO) } else { (sight, HUNT_RATIO) };
+    if let Some(b) = seen
+        .bandits
+        .iter()
+        .filter(|b| b.1.distance(pos) <= bandit_sight && b.2 <= bandit_ratio * own)
+        .min_by(|a, b| closest(&a.1, &b.1))
+    {
         army.state = AiArmyState::Hunting(Prey::Bandits(b.0));
         army.hunted = 0.0;
         army.target = None;
@@ -587,14 +735,8 @@ fn decide(
         return Some(format!("The {} army goes after your workers!", faction.name()));
     }
     // One of its places is threatened and this army was picked to guard it.
-    if let Some((place, by_hero)) = seen.defend {
-        if !matches!(army.state, AiArmyState::Defending { place: p, .. } if p == place) {
-            army.state = AiArmyState::Defending { place, left: GUARD_SECS };
-            army.target = None;
-            army.path = path_to(place.tile_in(towers, bases));
-            return by_hero.then(|| format!("The {} army comes to defend its {}!", faction.name(), place.noun()));
-        }
-        return None;
+    if let Some(alarm) = seen.defend {
+        return defend(army, alarm, &path_to(alarm.place.tile_in(towers, bases)));
     }
     if matches!(army.state, AiArmyState::Defending { .. }) {
         return None; // finishing its guard duty
@@ -602,6 +744,7 @@ fn decide(
     // Fill our own towers first, then march on a target in reach, or patrol near home.
     let still_valid = army.target.is_some_and(|t| match t {
         Garrison::Tower(i) if towers[i].owner == faction => towers[i].garrison.slots() < TOWER_SLOTS,
+        Garrison::Castle(i) if bases[i].owner == faction => bases[i].garrison.slots() < seen.castle_cap,
         _ => t.owner_in(towers, bases) != faction && !seen.busy.iter().any(|(p, f)| *p == t && *f != faction),
     });
     if army.state == AiArmyState::Walking && still_valid {
@@ -617,7 +760,8 @@ fn decide(
         army.state = AiArmyState::Walking;
         return None;
     }
-    let reinforce = choose_reinforce(faction, here, towers, terrain);
+    let main = home_castle(faction, bases, terrain, army.pos);
+    let reinforce = choose_reinforce(faction, here, towers, bases, terrain, main, seen.castle_cap);
     let attack = if reinforce.is_none() { choose_target(faction, &army.army, here, towers, bases, terrain, seen.busy, seen.kingdom) } else { None };
     // Now and then it stays on guard at one of its own places for a while instead of attacking.
     if attack.is_some() && rng.random_bool(IDLE_GUARD_CHANCE) {
@@ -675,12 +819,15 @@ pub fn ai_armies_act(
     let hero_pos = world.hero_pos;
     let player_strength = player.as_ref().map_or(0.0, |p| autoresolve::strength(&p.0));
     let player_armed = player.as_ref().is_some_and(|p| !p.0.is_empty());
+    // Places under siege right now: by you, or by an AI army.
+    let mut under_siege: Vec<Garrison> = world.player_siege.map(|s| s.place).into_iter().collect();
     let busy: Vec<(Garrison, Faction)> = world
         .armies
         .iter()
         .filter(|a| a.alive && matches!(a.state, AiArmyState::Capturing(_)))
         .filter_map(|a| a.target.map(|t| (t, a.faction)))
         .collect();
+    under_siege.extend(busy.iter().map(|(p, _)| *p));
     let bandit_seen: Vec<(usize, Vec2, f32)> = world
         .bandits
         .iter()
@@ -709,7 +856,7 @@ pub fn ai_armies_act(
         army_info.iter().enumerate().find(|(i, (g, alive, _, c))| *i != me && *g == f && *alive && c.is_some()).and_then(|(_, (_, _, _, c))| *c)
     };
 
-    let WorldState { armies, towers, terrain, bases, upgrades, bandits, workers, sites, ai_craft, .. } = &mut *world;
+    let WorldState { armies, towers, terrain, bases, upgrades, bandits, workers, sites, ai_craft, sellers, .. } = &mut *world;
     let siege_secs = upgrades.siege_secs();
     // Kingdoms that lost their castle this frame.
     let mut fallen: Vec<(Faction, Faction)> = Vec::new();
@@ -719,7 +866,7 @@ pub fn ai_armies_act(
             continue;
         }
         let here = terrain.tile_of(army.pos);
-        let home = bases.iter().position(|b| b.home == army.faction && b.owner == army.faction);
+        let home = home_castle(army.faction, bases, terrain, army.pos);
         let home_tile = home.map(|h| bases[h].spawn_tile());
         // Standing at a tower: count down, fight for it, then watch the animation before leaving.
         match army.state {
@@ -805,9 +952,18 @@ pub fn ai_armies_act(
                 if left > 0.0 {
                     army.state = AiArmyState::Leaving(left);
                 } else if army.army.slots() < AI_RETREAT_BELOW {
-                    // Too weak to go on: head home.
-                    army.path = home_tile.and_then(|h| terrain.find_path(here, h)).unwrap_or_default();
-                    army.state = AiArmyState::Returning;
+                    // Too weak to go on: restock at a closer seller if it has gold, else head home.
+                    let gold = treasuries.gold(army.faction);
+                    match seller_nearer_than_home(here, home_tile, sellers, gold, terrain).filter(|_| !army.army.is_empty()) {
+                        Some((s, path)) => {
+                            army.path = path;
+                            army.state = AiArmyState::Restocking(s);
+                        }
+                        None => {
+                            army.path = home_tile.and_then(|h| terrain.find_path(here, h)).unwrap_or_default();
+                            army.state = AiArmyState::Returning;
+                        }
+                    }
                 } else {
                     army.state = AiArmyState::Walking;
                 }
@@ -824,6 +980,15 @@ pub fn ai_armies_act(
             }
             AiArmyState::Resting(left) => {
                 let left = left - dt;
+                // Resting somewhere that is no longer its home (e.g. you took that castle): walk to
+                // the castle it still holds first.
+                if let Some(gate) = home_tile.map(|t| terrain.world_pos(t))
+                    && gate.distance(army.pos) > TOUCH_DISTANCE
+                {
+                    army.path = home_tile.and_then(|h| terrain.find_path(here, h)).unwrap_or_default();
+                    army.state = AiArmyState::Returning;
+                    continue;
+                }
                 if left > 0.0 {
                     army.state = AiArmyState::Resting(left);
                 } else if let Some(fresh) = home.and_then(|h| {
@@ -835,12 +1000,16 @@ pub fn ai_armies_act(
                     army.path.clear();
                     army.state = AiArmyState::Walking;
                 } else {
-                    // Not enough troops at home yet: look again in a moment.
-                    army.state = AiArmyState::Resting(ai::AI_THINK_SECS);
+                    // The castle cannot fill it: after gathering, it gets a free army.
+                    let size = ai_craft.get(&army.faction).copied().unwrap_or_default().army_size;
+                    army.army = free_army(army.faction, size, &mut rng);
+                    army.target = None;
+                    army.path.clear();
+                    army.state = AiArmyState::Walking;
                 }
                 continue;
             }
-            // Walking, Patrolling, Hunting, Defending and Fleeing: below.
+            // Walking, Patrolling, Hunting and Defending: below.
             _ => {}
         }
 
@@ -858,6 +1027,10 @@ pub fn ai_armies_act(
                 defend: defenders[idx],
                 kingdom: kingdom_strength(army.faction),
                 assault: assault_of(army.faction, idx),
+                castle_cap: ai_craft.get(&army.faction).copied().unwrap_or_default().castle_slots,
+                army_cap: ai_craft.get(&army.faction).copied().unwrap_or_default().army_size,
+                gold: treasuries.gold(army.faction),
+                sellers,
             };
             if let Some(text) = decide(army, here, home_tile.unwrap_or(here), own, &seen, towers, bases, terrain, &mut rng) {
                 nearby.say_for(text, 4.0);
@@ -879,12 +1052,22 @@ pub fn ai_armies_act(
                         }
                     }
                 }
-                if follow_path(&mut army.pos, &mut army.path, terrain, AI_ARMY_SPEED, dt) {
-                    // Our own tower: hand over units until it is full, then go home to refill if small.
+                // Joining a siege its kingdom has already started: hurry.
+                let speed = if under_siege.contains(&t) { SIEGE_RUSH_SPEED } else { AI_ARMY_SPEED };
+                if follow_path(&mut army.pos, &mut army.path, terrain, speed, dt) {
+                    // Our own castle or tower: hand over units until it is full, then go home to
+                    // refill if small.
                     if t.owner_in(towers, bases) == army.faction {
-                        if let Garrison::Tower(i) = t {
-                            let room = TOWER_SLOTS.saturating_sub(towers[i].garrison.slots());
-                            give_units(&mut army.army, &mut towers[i].garrison, room);
+                        let castle_cap = ai_craft.get(&army.faction).copied().unwrap_or_default().castle_slots;
+                        match t {
+                            Garrison::Tower(i) => {
+                                let room = TOWER_SLOTS.saturating_sub(towers[i].garrison.slots());
+                                give_units(&mut army.army, &mut towers[i].garrison, room);
+                            }
+                            Garrison::Castle(i) => {
+                                let room = castle_cap.saturating_sub(bases[i].garrison.slots());
+                                give_units(&mut army.army, &mut bases[i].garrison, room);
+                            }
                         }
                         army.target = None;
                         if army.army.slots() < AI_RETREAT_BELOW {
@@ -913,13 +1096,23 @@ pub fn ai_armies_act(
             AiArmyState::Patrolling => {
                 follow_path(&mut army.pos, &mut army.path, terrain, AI_ARMY_SPEED, dt);
             }
-            AiArmyState::Fleeing => {
-                if follow_path(&mut army.pos, &mut army.path, terrain, HUNT_SPEED, dt) {
+            AiArmyState::Restocking(s) => {
+                if follow_path(&mut army.pos, &mut army.path, terrain, AI_ARMY_SPEED, dt) {
+                    // At the seller: buy its kind with the kingdom's gold, up to full size.
+                    let kind = sellers[s].unit;
+                    let size = ai_craft.get(&army.faction).copied().unwrap_or_default().army_size;
+                    let want = size.saturating_sub(army.army.slots());
+                    let can = treasuries.gold(army.faction) / kind.price().max(1);
+                    let n = want.min(can);
+                    if n > 0 && treasuries.spend(army.faction, n * kind.price()) {
+                        army.army.add(kind, n);
+                    }
                     army.state = AiArmyState::Walking;
                 }
             }
             AiArmyState::Defending { place, left } => {
-                let arrived = follow_path(&mut army.pos, &mut army.path, terrain, HUNT_SPEED, dt);
+                let speed = if under_siege.contains(&place) { SIEGE_RUSH_SPEED } else { HUNT_SPEED };
+                let arrived = follow_path(&mut army.pos, &mut army.path, terrain, speed, dt);
                 if arrived {
                     let left = left - dt;
                     army.state =
@@ -1077,12 +1270,13 @@ pub fn bandits_wander(
 }
 
 /// Beaten armies' ghosts fly straight to their castle gate at `GHOST_SPEED` (over water, cliffs
-/// and layers), then wait there: `respawn_in` only counts down once they are home. A kingdom
-/// without its castle has no home: its ghosts vanish.
+/// and layers), then wait there: `respawn_in` only counts down once they are home. Home is the
+/// kingdom's main castle (`home_castle`: its own, or the nearest it still holds); a kingdom
+/// without any castle has no home: its ghosts vanish.
 pub fn ghosts_fly_home(world: &mut WorldState, dt: f32) {
     let WorldState { armies, bases, terrain, .. } = world;
     for army in armies.iter_mut().filter(|a| !a.alive && a.ghost) {
-        let home = bases.iter().find(|b| b.home == army.faction && b.owner == army.faction);
+        let home = home_castle(army.faction, bases, terrain, army.pos).map(|b| &bases[b]);
         let (Some(base), true) = (home, army.respawn_in.is_finite()) else {
             army.ghost = false;
             army.respawn_in = f32::INFINITY;
@@ -1102,7 +1296,7 @@ pub fn ghosts_fly_home(world: &mut WorldState, dt: f32) {
 
 /// The label over a ghost.
 fn ghost_text(army: &AiArmy, world: &WorldState) -> String {
-    let home = world.bases.iter().find(|b| b.home == army.faction).map(|b| world.terrain.world_pos(b.spawn_tile()));
+    let home = home_castle(army.faction, &world.bases, &world.terrain, army.pos).map(|b| world.terrain.world_pos(world.bases[b].spawn_tile()));
     if home.is_some_and(|h| h == army.pos) {
         format!("{} army (ghost)\nback in {}s", army.faction.name(), army.respawn_in.max(0.0).ceil() as u32)
     } else {
@@ -1233,7 +1427,7 @@ pub fn respawn_step(world: &mut WorldState, dt: f32, rng: &mut impl Rng, avoid: 
         // it, otherwise the one with the most troops. The new army is drawn from that garrison;
         // without enough troops it waits at the castle until there are.
         let faction = army.faction;
-        let home = world.bases.iter().position(|b| b.home == faction && b.owner == faction);
+        let home = home_castle(faction, &world.bases, &world.terrain, world.armies[i].pos);
         let fullest = (0..world.bases.len()).filter(|&b| world.bases[b].owner == faction).max_by_key(|&b| world.bases[b].garrison.slots());
         let Some(b) = home.filter(|&h| world.bases[h].garrison.slots() >= ai::AI_MIN_GARRISON + ai::AI_MIN_ARMY).or(fullest).or(home) else {
             world.armies[i].respawn_in = f32::INFINITY;
@@ -1253,7 +1447,7 @@ pub fn respawn_step(world: &mut WorldState, dt: f32, rng: &mut impl Rng, avoid: 
         army.hunted = 0.0;
         (army.army, army.state) = match fresh {
             Some(fresh) => (fresh, AiArmyState::Walking),
-            None => (Army::empty(faction), AiArmyState::Resting(ai::AI_THINK_SECS)),
+            None => (Army::empty(faction), AiArmyState::Resting(FREE_ARMY_SECS)),
         };
         armies_back.push(i);
     }
@@ -1407,6 +1601,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::units::HERO_SLOTS;
     use crate::overworld::economy::Treasuries;
 
     /// Ghosts, new armies and bandits coming back, as in the game (without the sprites).
@@ -1640,6 +1835,125 @@ mod tests {
     }
 
     #[test]
+    fn taking_one_castle_does_not_wipe_a_kingdom_that_holds_another() {
+        let mut world = WorldState::generate(3);
+        let mut treasuries = Treasuries::default();
+        let red = world.bases[1].owner;
+        // Red also holds castle 2.
+        world.bases[2].owner = red;
+        world.capture(EncounterSource::Base(1), &mut treasuries);
+        assert!(world.armies.iter().filter(|a| a.faction == red).all(|a| a.alive), "Red still has a castle");
+        // Its armies now call castle 2 home, and its ghosts fly there.
+        assert_eq!(home_castle(red, &world.bases, &world.terrain, Vec2::ZERO), Some(2));
+        let i = world.armies.iter().position(|a| a.faction == red).unwrap();
+        world.armies[i].die();
+        for _ in 0..3000 {
+            ghosts_fly_home(&mut world, 0.1);
+        }
+        assert_eq!(world.armies[i].pos, world.terrain.world_pos(world.bases[2].spawn_tile()));
+        // Losing the last castle ends the kingdom.
+        world.capture(EncounterSource::Base(2), &mut treasuries);
+        assert!(world.armies.iter().filter(|a| a.faction == red).all(|a| !a.alive));
+    }
+
+    #[test]
+    fn armies_fill_captured_castles_before_towers() {
+        let mut world = WorldState::generate(3);
+        let red = world.bases[1].owner;
+        world.bases[2].owner = red;
+        world.bases[2].garrison = Army::empty(red);
+        world.towers[0].owner = red;
+        world.towers[0].garrison = Army::empty(red);
+        let here = world.terrain.tile_of(world.armies[0].pos);
+        let home = home_castle(red, &world.bases, &world.terrain, world.armies[0].pos);
+        assert_eq!(home, Some(1), "its own castle is home");
+        let (to, _) = choose_reinforce(red, here, &world.towers, &world.bases, &world.terrain, home, 30).unwrap();
+        assert_eq!(to, Garrison::Castle(2), "the empty captured castle first, the home castle never");
+        world.bases[2].garrison = Army::new(red, &[(UnitKind::Warrior, 30)]);
+        let (to, _) = choose_reinforce(red, here, &world.towers, &world.bases, &world.terrain, home, 30).unwrap();
+        assert_eq!(to, Garrison::Tower(0), "then the towers");
+    }
+
+    #[test]
+    fn you_near_their_castle_gathers_all_their_armies_there() {
+        let world = WorldState::generate(3);
+        let faction = world.armies[0].faction;
+        let c = world.bases.iter().position(|b| b.owner == faction).unwrap();
+        let gate = world.terrain.world_pos(world.bases[c].spawn_tile());
+        let defenders = assign_defenders(&world, gate + Vec2::new(5.0 * TILE, 0.0), true, &[]);
+        let called: Vec<usize> = (0..world.armies.len()).filter(|&i| defenders[i].is_some()).collect();
+        let theirs: Vec<usize> = (0..world.armies.len()).filter(|&i| world.armies[i].faction == faction).collect();
+        assert_eq!(called, theirs, "every army of that kingdom gathers at its castle");
+    }
+
+    #[test]
+    fn a_resting_army_away_from_home_walks_home() {
+        let (world, _) = lone_army(
+            |world| {
+                let army = &mut world.armies[0];
+                army.army = Army::empty(army.faction);
+                army.pos += Vec2::new(4.0 * TILE, 0.0);
+                army.state = AiArmyState::Resting(5.0);
+            },
+            1,
+        );
+        assert!(matches!(world.armies[0].state, AiArmyState::Returning), "{:?}", world.armies[0].state);
+    }
+
+    #[test]
+    fn an_empty_army_gets_a_free_army_after_gathering() {
+        let (world, _) = lone_army(
+            |world| {
+                let faction = world.armies[0].faction;
+                let home = world.bases.iter().position(|b| b.home == faction).unwrap();
+                world.bases[home].garrison = Army::empty(faction);
+                let army = &mut world.armies[0];
+                army.army = Army::empty(faction);
+                army.pos = world.terrain.world_pos(world.bases[home].spawn_tile());
+                army.state = AiArmyState::Resting(FREE_ARMY_SECS);
+            },
+            FREE_ARMY_SECS as u32 + 2,
+        );
+        assert!(world.armies[0].army.slots() >= 7, "a free army: {}", world.armies[0].army.summary());
+    }
+
+    #[test]
+    fn worn_down_armies_restock_at_a_closer_seller() {
+        let faction = WorldState::generate(3).armies[0].faction;
+        let (world, treasuries) = {
+            let mut world = WorldState::generate(3);
+            world.armies.iter_mut().skip(1).for_each(|a| {
+                a.alive = false;
+                a.respawn_in = f32::INFINITY;
+            });
+            world.bandits.iter_mut().for_each(|b| b.alive = false);
+            let s = world.sellers.iter().position(|s| s.unit == UnitKind::Warrior).unwrap();
+            let army = &mut world.armies[0];
+            army.pos = world.terrain.world_pos(world.sellers[s].tile);
+            army.army = Army::new(faction, &[(UnitKind::Archer, 2)]);
+            let mut treasuries = Treasuries::default();
+            treasuries.add(faction, 1000);
+            let mut app = App::new();
+            app.insert_resource(world)
+                .insert_resource(Nearby::default())
+                .insert_resource(treasuries)
+                .insert_resource(Time::<()>::default())
+                .add_systems(Update, ai_armies_act);
+            for _ in 0..30 {
+                app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(100));
+                app.update();
+            }
+            let world = app.world_mut().remove_resource::<WorldState>().unwrap();
+            let treasuries = app.world_mut().remove_resource::<Treasuries>().unwrap();
+            (world, treasuries)
+        };
+        let army = &world.armies[0].army;
+        assert_eq!(army.count_of(UnitKind::Warrior), HERO_SLOTS - 2, "filled up with the seller's warriors");
+        let spent = (HERO_SLOTS - 2) * UnitKind::Warrior.price();
+        assert_eq!(treasuries.gold(faction), crate::overworld::economy::KINGDOM_STARTING_GOLD + 1000 - spent);
+    }
+
+    #[test]
     fn nearby_armies_defend_their_places() {
         let mut world = WorldState::generate(3);
         let faction = world.armies[0].faction;
@@ -1650,7 +1964,23 @@ mod tests {
         assert!(crate::overworld::interact::helpers_of(&world, Garrison::Tower(0)).contains(&0));
         // Your hero close to it sounds the alarm: the nearest free army of that kingdom is sent.
         let defenders = assign_defenders(&world, at + Vec2::new(64.0, 0.0), true, &[]);
-        assert_eq!(defenders[0], Some((Garrison::Tower(0), true)));
+        assert_eq!(defenders[0], Some(Alarm { place: Garrison::Tower(0), by_hero: true, siege: false }));
+        // Your siege of it calls even a fleeing army back to defend it, before anything else.
+        world.armies[0].state = AiArmyState::Hunting(Prey::Hero);
+        world.player_siege = Some(crate::overworld::attack_panel::PlayerSiege { place: Garrison::Tower(0), left: 10.0 });
+        let defenders = assign_defenders(&world, at, true, &[]);
+        assert_eq!(defenders[0], Some(Alarm { place: Garrison::Tower(0), by_hero: true, siege: true }));
+        world.player_siege = None;
+        // A castle siege beats a tower siege: with both at once the one army goes to the castle.
+        let castle = Garrison::Castle(world.bases.iter().position(|b| b.owner == faction).unwrap());
+        world.armies.iter_mut().filter(|a| a.faction == faction).skip(1).for_each(|a| a.alive = false);
+        // Both within its reach: the army and the tower close to the castle.
+        let Garrison::Castle(c) = castle else { unreachable!() };
+        world.towers[0].tile = world.bases[c].centre() + IVec2::new(0, 6);
+        world.armies[0].pos = world.terrain.world_pos(world.bases[c].spawn_tile());
+        world.armies[0].state = AiArmyState::Walking;
+        let busy = [(Garrison::Tower(0), Faction::Black), (castle, Faction::Black)];
+        assert_eq!(assign_defenders(&world, Vec2::splat(1e6), false, &busy)[0].map(|a| a.place), Some(castle));
         // Without an army you are no threat.
         assert!(assign_defenders(&world, at, false, &[]).iter().all(|d| d.is_none()));
     }
@@ -1698,9 +2028,10 @@ mod tests {
                         events.push(format!("{:.1}min castle {i} {} -> {}", tick as f32 / 600.0, a.name(), b.name()));
                     }
                 }
+                // One kingdom holds every castle that is not yours (3, or 4 once yours fell too).
                 let ai: Vec<Faction> = now.iter().copied().filter(|f| !f.is_player()).collect();
-                if winner.is_none() && ai.len() == 3 && ai.iter().all(|f| *f == ai[0]) {
-                    winner = Some(format!("{} holds all 3 AI castles at {:.1} min", ai[0].name(), tick as f32 / 600.0));
+                if winner.is_none() && ai.len() >= 3 && ai.iter().all(|f| *f == ai[0]) {
+                    winner = Some(format!("{} holds every AI castle at {:.1} min", ai[0].name(), tick as f32 / 600.0));
                 }
                 last = now;
             }

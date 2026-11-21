@@ -331,10 +331,14 @@ impl WorldState {
                 base.prev_owner = Some(base.prev_owner.unwrap_or(loser));
                 base.owner = Faction::Reclaimers;
                 base.garrison = Army::empty(Faction::Reclaimers);
-                // A kingdom without a castle has nowhere to raise armies from.
-                for army in self.armies.iter_mut().filter(|a| a.faction == loser) {
-                    army.alive = false;
-                    army.respawn_in = f32::INFINITY;
+                // Only a kingdom left without any castle is beaten: its armies are gone for good.
+                // One that still holds another castle keeps its armies (they now call that home).
+                if !self.bases.iter().any(|b| b.owner == loser) {
+                    for army in self.armies.iter_mut().filter(|a| a.faction == loser) {
+                        army.alive = false;
+                        army.ghost = false;
+                        army.respawn_in = f32::INFINITY;
+                    }
                 }
                 (loser, treasuries.take_pct(loser, loot_pct))
             }
