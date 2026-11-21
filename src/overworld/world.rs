@@ -17,7 +17,7 @@ use crate::units::{Army, UnitKind};
 
 pub const MAP_WIDTH: i32 = 64;
 pub const MAP_HEIGHT: i32 = 48;
-pub const TOWER_COUNT: usize = 6;
+pub const TOWER_COUNT: usize = 10;
 /// Bases start this many patches apart (relaxed if the map is too cramped).
 const BASE_MIN_PATCH_DISTANCE: i32 = 3;
 /// Towers and sellers keep this far from base centres and from each other.
@@ -160,6 +160,8 @@ pub struct WorldState {
     pub workers: Vec<Worker>,
     /// What you crafted at the House (agents.md §1.8).
     pub upgrades: crate::upgrades::Upgrades,
+    /// What each AI kingdom has crafted (`ai::AI_LADDER`); missing = nothing yet.
+    pub ai_craft: std::collections::HashMap<Faction, super::ai::AiCraft>,
     /// Your siege of a tower or castle in progress (`attack_panel`).
     pub player_siege: Option<super::attack_panel::PlayerSiege>,
     pub hero_pos: Vec2,
@@ -183,6 +185,11 @@ impl WorldState {
                     && matches!(a.state, AiArmyState::Capturing(_) | AiArmyState::Leaving(_))
             })
             .map(|a| a.faction)
+    }
+
+    /// What `faction` has crafted so far.
+    pub fn ai_craft(&self, faction: Faction) -> super::ai::AiCraft {
+        self.ai_craft.get(&faction).copied().unwrap_or_default()
     }
 
     /// The AI army besieging `place` right now (standing at it, counting down), if any.
@@ -256,6 +263,7 @@ impl WorldState {
             workers: Vec::new(),
             upgrades: Default::default(),
             player_siege: None,
+            ai_craft: Default::default(),
             hero_pos: Vec2::ZERO,
         };
         world.hero_pos = world.hero_home_pos();

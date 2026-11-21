@@ -125,7 +125,8 @@ empty side always loses.
 label counts down ("besieging... Ns"). Then they **fight its garrison by auto-resolve** (an
 undefended one is simply taken). Win: the place is theirs and a random **10–30 %** of the army stays
 behind as its new garrison; the capture animation plays and the army walks on. A kingdom that loses
-its castle (and holds no other) loses its armies for good. Lose: the army is destroyed (a ghost, see below)
+its last castle is gone: **its army slots go over to the kingdom that took it**, which raises them
+from its own castles (so the winner grows). Lose: the army is destroyed (a ghost, see below)
 and the place keeps what is left of its garrison. **While an army is taking a tower (countdown and
 animation) the hero cannot attack it**; the HUD says who is taking it.
 
@@ -162,26 +163,52 @@ what it is doing, so you can watch it):
 - **Choosing a target** (`armies::choose_target`): among the towers and castles it does not own
   and can walk to, an army skips any whose garrison is stronger than **0.8 ×** its own strength, and
   picks the lowest score = walking distance in tiles × (1 + garrison strength / own strength): near
-  and weak first. Only places within reach of its territory count, and none another kingdom is
-  already besieging. A full castle (25–30 units) is usually too strong, so castles fall mostly after
-  their owner has emptied them.
+  and weak first. Only places within reach of its territory count (towers: 8 + 5 tiles; **castles:
+  8 + 20 tiles**, `CASTLE_REACH_TILES`, since castles are far apart), and none another kingdom is
+  already besieging.
+- **Storming castles together**: for a castle the garrison is compared with **all the kingdom's
+  armies together**, and once one army marches on (or besieges) an enemy castle, its fellow armies
+  join that assault. They fight the garrison one after another (each fight weakens it), and the
+  siege runs faster with every army at it.
+- **Random guard duty**: before marching on a new target, an army instead goes to guard one of
+  its own places for 20–40 s half of the time (`IDLE_GUARD_CHANCE`), labelled "guarding… Ns":
+  kingdoms do not attack non-stop.
 - **Armies meeting**: two AI armies of different kingdoms within touching distance (40 px) stop and
   fight for 6 s, then auto-resolve decides it; the loser is destroyed (a ghost).
-- **Spending gold** (`overworld/ai.rs`): every **5 s** each AI kingdom that holds its own castle buys
-  up to 3 units into its castle garrison, at the same prices as the player, while it can afford one
-  and the castle has room (30): Warrior 4, Archer 3, Lancer 2, Monk 1 (weights; Pawns are not bought).
+- **Spending gold** (`overworld/ai.rs`): every **5 s** each AI kingdom first **crafts** its next
+  step if it can pay for it, then buys up to 3 units **into every castle it holds**, at the same
+  prices as the player: Warrior 4, Archer 3, Lancer 2, Monk 1 (weights; Pawns are not bought). While
+  a crafting step is left, a castle stops buying at **12** units, so the kingdom saves for it.
+- **AI crafting** (`ai::AI_LADDER`, gold only, one step at a time, everything visible on the map):
+
+  | Step | Price | Effect |
+  |---|---|---|
+  | 1 | 60 | armies up to **25** units |
+  | 2 | 100 | **one more army** (raised from its castle) |
+  | 3 | 80 | castles hold **40** |
+  | 4 | 120 | armies up to **30** units |
+  | 5 | 180 | **one more army** |
+
+  The HUD says it when a kingdom crafts ("The Red kingdom raises another army!").
 - **Raising armies**: the first two armies start ready (random 4–8 Warriors, 2–5 Archers, 1–3
-  Lancers). After that an army is **drawn from the castle garrison**: everything above a reserve of
-  **10** units, at most 20, and only once at least **8** are available; until then the army waits at
-  the castle ("gathering troops"). A destroyed army comes back this way after its ghost is home.
+  Lancers). After that an army is **drawn from a castle garrison** (home if it has enough, else the
+  fullest castle it holds): everything above a reserve of **5** units, at most the crafted army size
+  (20, 25, 30), and only once at least **5** are available; until then the army waits at the castle
+  ("gathering troops"). A destroyed army comes back this way after its ghost is home; an army that
+  came home rests **10 s**.
+- **Testing the balance**: `cargo test conquest_report -- --ignored --nocapture` plays 60 minutes
+  of AI on seeds 1–8 (with income, crafting, ghosts and respawns, you doing nothing) and prints every
+  castle that changes hands and whether one kingdom took everything. Last run: one kingdom took
+  every castle on 3 seeds (yours, unattended, fell after 14–37 min), the others still had 2–3
+  kingdoms after an hour.
 
 **Ghosts** (`AiArmy::die`, `ghosts_fly_home`, `sync_ghosts`): however an AI army is destroyed (by
 you, another kingdom, bandits or a lost siege), it turns into a ghost knight
 (`units/ghost/ghost_knight_cut.png`, 9 frames of 224×241, cut out of the user's `ghost_knight.png`, a screenshot with the checkerboard baked in)
 that **flies straight to its castle gate at 140 px/s, ignoring water, cliffs and layers**, facing
-the way it flies, labelled "(ghost) flying home". At the gate it waits **30 s** ("back in Ns"),
-then a new army drawn from the garrison sets out. A kingdom that has lost its castle has no home:
-its ghosts vanish and its armies do not come back.
+the way it flies, labelled "(ghost) flying home". At the gate it waits **15 s** ("back in Ns"),
+then a new army drawn from the garrison sets out. A kingdom that has lost every castle has no home:
+its ghosts vanish (its army slots went to its conqueror).
 
 **Sieges of your castles and towers.** When an AI army starts besieging one of yours, a message says
 so and the HUD shows a line per siege with the seconds left ("SIEGE! … s left to get there (Tab,
@@ -335,7 +362,7 @@ Bases take four patch-sized (6×5) areas, at any tile, that are entirely layer-1
 ramps (`flat_spots`), spaced 3 patches apart (`patch_gap`, relaxed
 if needed).
 
-**Towers** (`world::place_towers`, 6 of them, Black with 3–5 Warriors + 2–4 Archers):
+**Towers** (`world::place_towers`, 10 of them, Black with 3–5 Warriors + 2–4 Archers):
 - **two on each of the two biggest mountains** (connected tiles of layer 2 and up), on the
   plateau top, the pair as far apart as that mountain allows, so they sit on **opposite sides** of it;
 - **the rest on open grass 8–12 tiles from the castle that has the fewest towers within 16 tiles**
@@ -990,7 +1017,9 @@ with → hand + frame; any other tile or stack → no sign.
 - [x] Crafting tree at the House: 13 upgrades bought with wood + meat + gold (army and castle size, siege time, income, workers, prices, healing)
 - [x] AI armies keep to their territory, chase you, flee from you, hunt bandits and your workers, defend their places (labels say what they do)
 - [ ] Bandits hunt workers; AI kingdoms send workers too
-- [ ] Kingdoms that differ (unit mix, army count, speed) and grow visibly when a kingdom falls
+- [x] AI kingdoms grow visibly: crafting ladder (bigger / more armies, bigger castles), conquerors inherit the army slots, castles stormed together; one kingdom can win
+- [ ] Kingdoms that differ (unit mix, army count, speed)
+- [ ] AI kingdoms that cannot beat a castle in reach send Pawns to gather and grow (user's idea)
 - [x] Terrain tiles, cliffs, ramps and decorations from the sprite map
 - [x] Patch-based world with plateaus up to layer 5, terraces and `R` ramps checked so every plateau can be reached
 - [x] Unit sprites with idle / run / attack / guard

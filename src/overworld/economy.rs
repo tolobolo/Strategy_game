@@ -126,7 +126,7 @@ impl Plugin for EconomyPlugin {
 
 /// Every `INCOME_INTERVAL_SECS` each castle and tower pays its current owner, plus the crafted
 /// income bonuses on yours.
-fn collect_income(
+pub fn collect_income(
     time: Res<Time>,
     mut timer: ResMut<IncomeTimer>,
     world: Res<WorldState>,
