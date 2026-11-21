@@ -1,11 +1,21 @@
 //! Dev tool: `SHOTS_DIR=<dir> WORLD_SEED=<seed> cargo run` photographs the overworld and quits.
-//! One overview of the whole map, then a close-up of every ramp (up to `MAX_CLOSE_UPS`), saved
-//! as `<dir>/seed<seed>_*.png`. Used to check the terrain by eye over many seeds.
+//! One overview of the whole map, a close-up of every ramp (up to `MAX_CLOSE_UPS`) and one of the
+//! nearest gold mine, forest and pasture, saved as `<dir>/seed<seed>_*.png`. Used to check the
+//! terrain and the resource art by eye. For the site close-ups a worker is put to work at each
+//! (and one tree is cut down), so the work animations and a stump show. The last shot puts the
+//! hero at your House with some upgrades bought and the crafting panel open.
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Capturing, Screenshot, save_to_disk};
 use bevy::transform::TransformSystems;
 
+use crate::assets::GameAssets;
+use crate::faction::Faction;
+use crate::overworld::Treasuries;
+use crate::overworld::buildings::BuildingKind;
+use crate::overworld::craft_panel::{OpenCraft, open_now};
+use crate::overworld::terrain::TILE;
+use crate::overworld::resources::{ResourceKind, SiteKind, Worker, WorkerState};
 use crate::overworld::world::WorldState;
 use crate::states::GameState;
 
@@ -22,7 +32,7 @@ pub struct ShotsPlugin;
 impl Plugin for ShotsPlugin {
     fn build(&self, app: &mut App) {
         let Ok(dir) = std::env::var("SHOTS_DIR") else { return };
-        app.insert_resource(Shots { dir, list: Vec::new(), next: 0, wait: WARM_UP_FRAMES })
+        app.insert_resource(Shots { dir, list: Vec::new(), next: 0, wait: WARM_UP_FRAMES, house: None })
             .add_systems(OnEnter(GameState::Overworld), plan_shots)
             .add_systems(
                 PostUpdate,
@@ -40,9 +50,11 @@ struct Shots {
     list: Vec<(String, Vec2, f32)>,
     next: usize,
     wait: u32,
+    /// Where the hero stands for the crafting shot; taken (set to None) once it is staged.
+    house: Option<Vec2>,
 }
 
-fn plan_shots(world: Res<WorldState>, windows: Query<&Window>, mut shots: ResMut<Shots>) {
+fn plan_shots(mut world: ResMut<WorldState>, windows: Query<&Window>, mut shots: ResMut<Shots>) {
     if !shots.list.is_empty() {
         return;
     }
@@ -58,16 +70,67 @@ fn plan_shots(world: Res<WorldState>, windows: Query<&Window>, mut shots: ResMut
         let name = format!("seed{seed}_ramp{}_{}x{}.png", i + 1, ramp.x, ramp.y);
         shots.list.push((name, map.world_pos(ramp), CLOSE_UP_SCALE));
     }
+    let home = world.home_base().spawn_tile();
+    for kind in [SiteKind::GoldMine, SiteKind::Forest, SiteKind::Pasture] {
+        let nearest = (0..world.sites.len())
+            .filter(|i| world.sites[*i].kind == kind)
+            .min_by_key(|i| (world.sites[*i].tile - home).abs().element_sum());
+        let Some(i) = nearest else { continue };
+        let tile = world.sites[i].tile;
+        let (pos, slot) = match kind {
+            SiteKind::GoldMine => (world.terrain.world_pos(tile + IVec2::NEG_X), None),
+            SiteKind::Forest => {
+                world.sites[i].trees[0].wood_left = 0;
+                world.sites[i].trees[0].regrow_in = 999.0;
+                world.sites[i].trees[1].claimed = true;
+                let tree = &world.sites[i].trees[1];
+                let drop = [65.0, 73.0, 26.0, 24.0][tree.variant as usize];
+                (world.terrain.world_pos(tree.tile) + Vec2::new(-34.0, 12.0 - drop), Some(1))
+            }
+            SiteKind::Pasture => {
+                let sheep = &mut world.sites[i].sheep[0];
+                sheep.claimed = true;
+                (sheep.pos + Vec2::new(-30.0, 0.0), Some(0))
+            }
+        };
+        world.workers.push(Worker {
+            faction: Faction::Reclaimers,
+            site: i,
+            castle: 0,
+            pos,
+            path: Vec::new(),
+            state: WorkerState::Working { left: 999.0, slot },
+            recalled: false,
+            alive: true,
+        });
+        let name = format!("seed{seed}_site_{}.png", kind.name().replace(' ', "_").to_lowercase());
+        shots.list.push((name, world.terrain.world_pos(tile), CLOSE_UP_SCALE));
+    }
+    // Last: the crafting panel at your House (hero moved there when the shot comes up).
+    if let Some((kind, tile)) = world.home_base().buildings().find(|(k, _)| *k == BuildingKind::House) {
+        let size = kind.size().as_vec2();
+        let centre = world.terrain.world_pos(tile) + (size - Vec2::ONE) * TILE / 2.0;
+        let feet = centre + Vec2::new(0.0, -size.y * TILE / 2.0 + 8.0);
+        shots.list.push((format!("seed{seed}_crafting.png"), feet, 1.0));
+        shots.house = Some(feet);
+    }
     if let Err(e) = std::fs::create_dir_all(&shots.dir) {
         error!("cannot create {}: {e}", shots.dir);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn take_shots(
     mut commands: Commands,
     mut shots: ResMut<Shots>,
     capturing: Query<(), With<Capturing>>,
     mut camera: Single<(&mut Transform, &mut Projection), With<Camera2d>>,
+    mut hero: Query<&mut Transform, (With<crate::overworld::Hero>, Without<Camera2d>)>,
+    mut world: ResMut<WorldState>,
+    mut treasuries: ResMut<Treasuries>,
+    mut craft: ResMut<OpenCraft>,
+    assets: Res<GameAssets>,
+    server: Res<AssetServer>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if shots.list.is_empty() || !capturing.is_empty() {
@@ -77,7 +140,26 @@ fn take_shots(
         exit.write(AppExit::Success);
         return;
     }
-    let (_, centre, scale) = shots.list[shots.next].clone();
+    let (name, centre, scale) = shots.list[shots.next].clone();
+    // The crafting shot: walk the hero to the House, fill the stores, buy a few upgrades, open it.
+    if name.ends_with("_crafting.png")
+        && let Some(feet) = shots.house.take()
+    {
+        for mut t in &mut hero {
+            t.translation.x = feet.x;
+            t.translation.y = feet.y - 10.0;
+        }
+        for kind in [ResourceKind::Wood, ResourceKind::Meat, ResourceKind::Gold] {
+            treasuries.add_resource(Faction::Reclaimers, kind, 150);
+        }
+        for id in ["basic_training", "army_slots", "gather", "castle_slots_1"] {
+            let up = crate::upgrades::book().get(id).unwrap();
+            let _ = world.upgrades.buy(up, &mut treasuries);
+        }
+        let selected = crate::upgrades::book().upgrades.iter().position(|u| u.id == "pawn_speed").unwrap_or(0);
+        open_now(&mut commands, &assets, &server, &mut craft, selected);
+        shots.wait = 30;
+    }
     let (transform, projection) = &mut *camera;
     transform.translation.x = centre.x;
     transform.translation.y = centre.y;

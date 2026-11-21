@@ -8,7 +8,7 @@ use super::economy::Treasuries;
 use super::world::{Base, EncounterSource, PendingEncounter, Tower, WorldState};
 use crate::faction::Faction;
 use crate::states::GameState;
-use crate::units::{Army, CASTLE_SLOTS, HERO_SLOTS, PlayerArmy, TOWER_SLOTS, UnitKind};
+use crate::units::{Army, CASTLE_SLOTS, PlayerArmy, TOWER_SLOTS, UnitKind};
 
 const MESSAGE_SECS: f32 = 2.5;
 
@@ -19,6 +19,8 @@ pub enum Touch {
     Shop { base: usize, kind: BuildingKind },
     Tower(usize),
     Seller(usize),
+    /// A gold mine, forest or sheep pasture (index into `WorldState::sites`).
+    Site(usize),
 }
 
 #[derive(Component)]
@@ -182,8 +184,10 @@ impl Garrison {
     }
 
     /// How many units it holds at most.
-    pub fn cap(self) -> u32 {
+    /// Your castles hold more with the crafted "Units in castle" upgrades.
+    pub fn cap(self, world: &WorldState) -> u32 {
         match self {
+            Garrison::Castle(i) if world.bases[i].owner.is_player() => world.upgrades.castle_slots(),
             Garrison::Castle(_) => CASTLE_SLOTS,
             Garrison::Tower(_) => TOWER_SLOTS,
         }
@@ -238,14 +242,20 @@ pub fn transfer(
     store: bool,
     all: bool,
 ) {
-    let cap = place.cap();
+    // Your Pawns out working still hold their castle slots.
+    let reserved = match place {
+        Garrison::Castle(i) => world.workers_out(i),
+        Garrison::Tower(_) => 0,
+    };
+    let cap = place.cap(world).saturating_sub(reserved);
+    let hero_cap = world.upgrades.hero_slots();
     let garrison = place.army_mut(world);
     let hero = &mut player_army.0;
 
     let (from, to, cap, verb) = if store {
         (hero, garrison, cap, "stored")
     } else {
-        (garrison, hero, HERO_SLOTS, "took")
+        (garrison, hero, hero_cap, "took")
     };
     let wanted = if all { from.count_of(kind) } else { 1 };
     let room = cap.saturating_sub(to.slots());
@@ -284,21 +294,28 @@ pub fn buy_units(
         _ => None,
     };
     let Some(unit) = unit else { return };
-    try_buy(unit, &mut nearby, &mut treasuries, &mut player_army);
+    try_buy(unit, &world, &mut nearby, &mut treasuries, &mut player_army);
 }
 
 /// Hire one unit for the hero if there is room and gold. Used by `R` and the shop panel's button.
-pub fn try_buy(unit: UnitKind, nearby: &mut Nearby, treasuries: &mut Treasuries, player_army: &mut PlayerArmy) -> bool {
-    if player_army.0.slots() >= HERO_SLOTS {
-        nearby.say(format!("Your army is full ({HERO_SLOTS} units)."));
+pub fn try_buy(
+    unit: UnitKind,
+    world: &WorldState,
+    nearby: &mut Nearby,
+    treasuries: &mut Treasuries,
+    player_army: &mut PlayerArmy,
+) -> bool {
+    let (slots, price) = (world.upgrades.hero_slots(), world.upgrades.unit_price(unit));
+    if player_army.0.slots() >= slots {
+        nearby.say(format!("Your army is full ({slots} units)."));
         return false;
     }
-    if !treasuries.spend(Faction::Reclaimers, unit.price()) {
-        nearby.say(format!("Not enough gold: {} costs {}g.", unit.name(), unit.price()));
+    if !treasuries.spend(Faction::Reclaimers, price) {
+        nearby.say(format!("Not enough gold: {} costs {price}g.", unit.name()));
         return false;
     }
     player_army.0.add(unit, 1);
-    nearby.say(format!("Hired a {} for {}g.", unit.name(), unit.price()));
+    nearby.say(format!("Hired a {} for {price}g.", unit.name()));
     true
 }
 

@@ -9,12 +9,16 @@ pub mod army_panel;
 pub mod autoresolve;
 pub mod buildings;
 pub mod castle_panel;
+pub mod craft_panel;
 pub mod economy;
 pub mod interact;
 pub mod map;
+pub mod resource_art;
+pub mod resources;
 pub mod shop;
 pub mod terrain;
 pub mod world;
+pub mod work_panel;
 pub mod worldgen;
 
 use bevy::prelude::*;
@@ -28,8 +32,8 @@ use crate::assets::{
 };
 use crate::faction::Faction;
 use crate::states::GameState;
-use crate::ui::{army_stat, big_ribbon, gold_stat};
-use crate::units::{HERO_SLOTS, PlayerArmy, TOWER_SLOTS, Team, UnitKind};
+use crate::ui::{army_stat, big_ribbon, gold_stat, resource_stat};
+use crate::units::{PlayerArmy, TOWER_SLOTS, Team, UnitKind};
 use buildings::BuildingKind;
 use economy::{INCOME_INTERVAL_SECS, TOWER_INCOME};
 use interact::{Touch, Touchable};
@@ -67,6 +71,10 @@ struct HeroSprite;
 struct HudGold;
 #[derive(Component)]
 struct HudArmy;
+#[derive(Component)]
+struct HudWood;
+#[derive(Component)]
+struct HudMeat;
 /// Castles, towers and layer.
 #[derive(Component)]
 struct HudInfo;
@@ -110,6 +118,9 @@ impl Plugin for OverworldPlugin {
             .init_resource::<castle_panel::OpenCastle>()
             .init_resource::<army_panel::OpenArmy>()
             .init_resource::<army_panel::ArmyPanelShown>()
+            .init_resource::<work_panel::OpenWork>()
+            .init_resource::<craft_panel::OpenCraft>()
+            .init_resource::<resources::PendingDeliveries>()
             .add_plugins(economy::EconomyPlugin)
             .add_systems(OnEnter(GameState::Overworld), spawn_overworld)
             .add_systems(
@@ -131,12 +142,23 @@ impl Plugin for OverworldPlugin {
                         armies::animate_roamers,
                     )
                         .chain(),
+                    (
+                        resources::resources_act,
+                        resource_art::refresh_site_visuals,
+                        resource_art::sync_sheep,
+                        resource_art::sync_workers,
+                        resource_art::spawn_delivery_pops,
+                        resource_art::animate_delivery_pops,
+                    )
+                        .chain(),
                     refresh_building_visuals,
                     capture_visuals,
                     interact::trigger_fights,
                     armies::roamer_encounters,
                     (map::toggle_world_map, shop::toggle_shop, shop::wire_shop_buttons, shop::refresh_shop_status, shop::animate_ui_images).chain(),
                     (castle_panel::toggle_castle, castle_panel::wire_castle_buttons, castle_panel::refresh_castle_panel, castle_panel::join_key).chain(),
+                    (work_panel::toggle_work, work_panel::wire_work_buttons, work_panel::refresh_work_panel).chain(),
+                    (craft_panel::toggle_craft, craft_panel::wire_craft_buttons, craft_panel::refresh_craft_panel).chain(),
                     (army_panel::toggle_army, army_panel::refresh_army_panel, army_panel::wire_army_buttons, army_panel::refresh_army_slots).chain(),
                     refresh_overworld_hud,
                 )
@@ -364,8 +386,9 @@ fn building_text(world: &WorldState, touch: Touch) -> (Faction, String) {
         }
         Touch::Seller(i) => {
             let unit = world.sellers[i].unit;
-            (Faction::Black, format!("Idle {}\nE: hire for {}g", unit.name(), unit.price()))
+            (Faction::Black, format!("Idle {}\nR: hire for {}g", unit.name(), world.upgrades.unit_price(unit)))
         }
+        Touch::Site(i) => (Faction::Black, world.sites[i].kind.name().to_string()),
     }
 }
 
@@ -397,7 +420,7 @@ fn owner_of(world: &WorldState, touch: Touch) -> (Faction, Option<Faction>) {
     match touch {
         Touch::Castle(i) | Touch::Shop { base: i, .. } => (world.bases[i].owner, world.bases[i].prev_owner),
         Touch::Tower(i) => (world.towers[i].owner, world.towers[i].prev_owner),
-        Touch::Seller(_) => (Faction::Black, None),
+        Touch::Seller(_) | Touch::Site(_) => (Faction::Black, None),
     }
 }
 
@@ -466,6 +489,7 @@ fn spawn_overworld(
 ) {
     spawn_ground(&mut commands, &assets, &world);
     spawn_decorations(&mut commands, &assets, &world);
+    resource_art::spawn_sites(&mut commands, &assets, &world);
 
     // Kingdom bases: every building is the pack's sprite in the holder's colour.
     for (bi, base) in world.bases.iter().enumerate() {
@@ -492,7 +516,7 @@ fn spawn_overworld(
 
     // Idle sellers.
     for (si, seller) in world.sellers.iter().enumerate() {
-        let text = format!("Idle {}\nE: hire for {}g", seller.unit.name(), seller.unit.price());
+        let text = format!("Idle {}\nR: hire for {}g", seller.unit.name(), world.upgrades.unit_price(seller.unit));
         commands.spawn((
             Transform::from_translation(world.terrain.world_pos(seller.tile).extend(1.0)),
             Visibility::default(),
@@ -552,6 +576,8 @@ fn spawn_overworld(
                 Pickable::IGNORE,
                 children![
                     gold_stat(&assets, HudGold, 18.0),
+                    resource_stat(assets.ui.icon_wood.clone(), HudWood, 18.0),
+                    resource_stat(assets.ui.icon_meat.clone(), HudMeat, 18.0),
                     army_stat(&assets, HudArmy, 18.0),
                     (
                         HudInfo,
@@ -592,6 +618,7 @@ fn spawn_overworld(
 /// (`TerrainMap::can_step`); against anything else the hero slides along the edge.
 fn hero_input(
     keys: Res<ButtonInput<KeyCode>>,
+    craft: Res<craft_panel::OpenCraft>,
     time: Res<Time>,
     world: Res<WorldState>,
     mut hero: Single<(&mut Transform, &MoveSpeed, &mut Layer), With<Hero>>,
@@ -609,6 +636,10 @@ fn hero_input(
     }
     if keys.any_pressed([KeyCode::KeyD, KeyCode::ArrowRight]) {
         dir.x += 1.0;
+    }
+    // The crafting panel uses the arrow keys for its selection: the hero stands still meanwhile.
+    if craft.0.is_some() {
+        dir = Vec2::ZERO;
     }
     let (transform, speed, layer) = &mut *hero;
     let step = dir.normalize_or_zero() * speed.0 * time.delta_secs();
@@ -667,11 +698,15 @@ fn refresh_overworld_hud(
         Single<&mut Text, With<HudArmy>>,
         Single<&mut Text, With<HudInfo>>,
         Single<&mut Text, With<HudPrompt>>,
+        Single<&mut Text, With<HudWood>>,
+        Single<&mut Text, With<HudMeat>>,
     )>,
     mut banner: Single<&mut Visibility, With<LandUnitedBanner>>,
 ) {
     let gold = treasuries.player_gold().to_string();
-    let slots = format!("{}/{}  {}", army.0.slots(), HERO_SLOTS, army.0.summary());
+    let wood = treasuries.amount(Faction::Reclaimers, resources::ResourceKind::Wood).to_string();
+    let meat = treasuries.amount(Faction::Reclaimers, resources::ResourceKind::Meat).to_string();
+    let slots = format!("{}/{}  {}", army.0.slots(), world.upgrades.hero_slots(), army.0.summary());
     let info = format!(
         "Castles {}/{}    Towers {}/{}    Layer {}",
         world.castles_owned(),
@@ -690,7 +725,13 @@ fn refresh_overworld_hud(
         Some(Touch::Castle(i)) => format!("Castle of the {}. Touching it attacks!", world.bases[i].owner.name()),
         Some(Touch::Shop { base, kind }) if world.bases[base].owner.is_player() => {
             let unit = kind.sells().unwrap();
-            format!("{}: Tab = open the shop   R = hire a {} for {}g", kind.name(), unit.name(), unit.price())
+            let craft = if kind == BuildingKind::House { "   C = crafting" } else { "" };
+            format!(
+                "{}: Tab = open the shop   R = hire a {} for {}g{craft}",
+                kind.name(),
+                unit.name(),
+                world.upgrades.unit_price(unit)
+            )
         }
         Some(Touch::Shop { base, kind }) => {
             format!("{} of the {}. Take their castle to use it.", kind.name(), world.bases[base].owner.name())
@@ -706,7 +747,17 @@ fn refresh_overworld_hud(
         },
         Some(Touch::Seller(i)) => {
             let unit = world.sellers[i].unit;
-            format!("Idle {}: Tab = open the shop   R = hire for {}g", unit.name(), unit.price())
+            format!("Idle {}: Tab = open the shop   R = hire for {}g", unit.name(), world.upgrades.unit_price(unit))
+        }
+        Some(Touch::Site(i)) => {
+            let site = &world.sites[i];
+            format!(
+                "{}: {}   workers {}/{}\nTab: send Pawns from your castle to work here",
+                site.kind.name(),
+                site.status(),
+                world.workers_at(i),
+                world.max_workers(i)
+            )
         }
         None => "WASD: move.  E: your army.  M: world map.  Walk into buildings, towers and armies to use or attack them.  Red circles: bandits.  Ramps at the ends of cliffs lead up.".to_string(),
     };
@@ -730,12 +781,14 @@ fn refresh_overworld_hud(
         text.push('\n');
         text.push_str(message);
     }
-    for (i, value) in [gold, slots, info, text].into_iter().enumerate() {
+    for (i, value) in [gold, slots, info, text, wood, meat].into_iter().enumerate() {
         let mut target = match i {
             0 => hud.p0().into_inner(),
             1 => hud.p1().into_inner(),
             2 => hud.p2().into_inner(),
-            _ => hud.p3().into_inner(),
+            3 => hud.p3().into_inner(),
+            4 => hud.p4().into_inner(),
+            _ => hud.p5().into_inner(),
         };
         if target.0 != value {
             target.0 = value;

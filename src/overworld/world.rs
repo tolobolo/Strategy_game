@@ -10,6 +10,7 @@ use super::armies::{self, AiArmy, BanditSquad};
 use super::buildings::{BASE_SIZE, BASE_SPAWN_OFFSET, BuildingKind, base_layout};
 use super::economy::Treasuries;
 use super::interact::Garrison;
+use super::resources::{self, Site, Worker};
 use super::terrain::{self, Noise, Terrain, TerrainMap};
 use crate::faction::Faction;
 use crate::units::{Army, UnitKind};
@@ -150,6 +151,12 @@ pub struct WorldState {
     pub decorations: Vec<Decoration>,
     pub armies: Vec<AiArmy>,
     pub bandits: Vec<BanditSquad>,
+    /// Gold mines, forests and sheep pastures (agents.md §1.7).
+    pub sites: Vec<Site>,
+    /// Your Pawns working the sites; `alive == false` slots are reused.
+    pub workers: Vec<Worker>,
+    /// What you crafted at the House (agents.md §1.8).
+    pub upgrades: crate::upgrades::Upgrades,
     pub hero_pos: Vec2,
 }
 
@@ -220,7 +227,8 @@ impl WorldState {
                 .collect();
 
         let moisture = Noise::new(seed.wrapping_add(0x51ED_270B));
-        let decorations = place_decorations(&terrain, &bases, &taken, &moisture, &mut rng);
+        let mut decorations = place_decorations(&terrain, &bases, &taken, &moisture, &mut rng);
+        let sites = resources::place_sites(&terrain, &bases, &mut taken, &mut decorations, seed);
 
         let mut world = Self {
             seed,
@@ -231,6 +239,9 @@ impl WorldState {
             decorations,
             armies: Vec::new(),
             bandits: Vec::new(),
+            sites,
+            workers: Vec::new(),
+            upgrades: Default::default(),
             hero_pos: Vec2::ZERO,
         };
         world.hero_pos = world.hero_home_pos();
@@ -289,6 +300,8 @@ impl WorldState {
 
     /// Apply a player victory. Returns the loser and the gold looted.
     pub fn capture(&mut self, source: EncounterSource, treasuries: &mut Treasuries) -> (Faction, u32) {
+        // Half the loser's gold, more with the crafted "Keep your money".
+        let loot_pct = 50 + self.upgrades.loot_bonus_pct();
         match source {
             EncounterSource::Base(i) => {
                 let loser = self.bases[i].owner;
@@ -301,19 +314,19 @@ impl WorldState {
                     army.alive = false;
                     army.respawn_in = f32::INFINITY;
                 }
-                (loser, treasuries.take_half(loser))
+                (loser, treasuries.take_pct(loser, loot_pct))
             }
             EncounterSource::Tower(i) => {
                 let loser = self.towers[i].owner;
                 self.towers[i].change_owner(Faction::Reclaimers, Army::empty(Faction::Reclaimers));
-                (loser, treasuries.take_half(loser))
+                (loser, treasuries.take_pct(loser, loot_pct))
             }
             EncounterSource::AiArmy(i) => {
                 let army = &mut self.armies[i];
                 army.alive = false;
                 army.respawn_in = armies::AI_RESPAWN_SECS;
                 army.army = Army::empty(army.faction);
-                (army.faction, treasuries.take_half(army.faction))
+                (army.faction, treasuries.take_pct(army.faction, loot_pct))
             }
             EncounterSource::Bandits(i) => {
                 let squad = &mut self.bandits[i];

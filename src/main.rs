@@ -10,6 +10,7 @@ mod shots;
 mod states;
 mod ui;
 mod units;
+mod upgrades;
 
 use bevy::prelude::*;
 use bevy::sprite::{SpritePickingMode, SpritePickingSettings};
@@ -24,6 +25,7 @@ fn main() {
     }
     // Load assets/units.ron now so a broken balance sheet fails at startup, not mid-game.
     units::stats::book();
+    upgrades::book();
     App::new()
         .add_plugins(
             DefaultPlugins

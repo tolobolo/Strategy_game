@@ -4,13 +4,12 @@
 
 use bevy::prelude::*;
 
-use super::interact::Nearby;
 use super::shop::UiAnimated;
 use crate::assets::{GameAssets, UnitAnim, UnitArt};
 use crate::faction::Faction;
 use crate::states::GameState;
 use crate::ui::{army_stat, avatar_index, panel, sliced};
-use crate::units::{HERO_SLOTS, PlayerArmy, UnitKind};
+use crate::units::{PlayerArmy, UnitKind};
 
 /// Open state: the selected kind. `None` = closed.
 #[derive(Resource, Default)]
@@ -280,8 +279,12 @@ fn on_close_click(click: On<Pointer<Click>>, mut open: ResMut<OpenArmy>) {
     }
 }
 
-pub fn refresh_army_slots(army: Res<PlayerArmy>, _nearby: Res<Nearby>, mut slots: Single<&mut Text, With<ArmySlots>>) {
-    let value = format!("{}/{}", army.0.slots(), HERO_SLOTS);
+pub fn refresh_army_slots(
+    army: Res<PlayerArmy>,
+    world: Res<super::world::WorldState>,
+    mut slots: Single<&mut Text, With<ArmySlots>>,
+) {
+    let value = format!("{}/{}", army.0.slots(), world.upgrades.hero_slots());
     if slots.0 != value {
         slots.0 = value;
     }

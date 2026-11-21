@@ -9,7 +9,7 @@ use crate::faction::Faction;
 use crate::overworld::world::EncounterSource;
 use crate::overworld::{Nearby, PendingEncounter, Treasuries, WorldState};
 use crate::states::{CombatPhase, GameState};
-use crate::units::{HERO_SLOTS, PlayerArmy, ShieldUp, Stack, Team};
+use crate::units::{PlayerArmy, ShieldUp, Stack, Team};
 
 pub const AP_PER_TURN: u8 = 3;
 
@@ -105,21 +105,30 @@ pub fn check_victory(
     if players_alive && enemies_alive {
         return;
     }
+    // The crafted "Regain health": your survivors walk away with full health.
+    let heal = world.upgrades.heal_after_fight();
     let survivors = |team: Team, guard: bool| -> Vec<Stack> {
         stacks
             .iter()
             .filter(|(t, s, g)| **t == team && !s.is_dead() && (team == Team::Enemy || *g == guard))
-            .map(|(_, s, _)| *s)
+            .map(|(_, s, _)| {
+                let mut s = *s;
+                if heal && team == Team::Player {
+                    s.lead_hp = s.kind.stats().health;
+                }
+                s
+            })
             .collect()
     };
 
     let result = if players_alive {
         player_army.0.stacks = survivors(Team::Player, false);
         if let Some(place) = encounter.defending {
+            let hero_cap = world.upgrades.hero_slots();
             let garrison = place.army_mut(&mut world);
             garrison.stacks = survivors(Team::Player, true);
             // Guards merged into your stacks: what does not fit with the hero stays at home.
-            let mut over = player_army.0.slots().saturating_sub(HERO_SLOTS);
+            let mut over = player_army.0.slots().saturating_sub(hero_cap);
             for stack in player_army.0.stacks.clone().into_iter().rev() {
                 let n = over.min(stack.count);
                 if n > 0 {
@@ -140,7 +149,7 @@ pub fn check_victory(
         CombatResult::Victory { loot }
     } else {
         let winner = world.faction_of(encounter.source);
-        let gold_lost = treasuries.take_half(Faction::Reclaimers);
+        let gold_lost = treasuries.take_pct(Faction::Reclaimers, world.upgrades.loss_pct());
         treasuries.add(winner, gold_lost);
         *player_army = PlayerArmy::default();
         if let (Some(place), EncounterSource::AiArmy(i)) = (encounter.defending, encounter.source) {

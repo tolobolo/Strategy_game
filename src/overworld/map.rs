@@ -100,7 +100,7 @@ fn legend(world: &WorldState) -> String {
         .map(|f| format!("{} = {}", color_name(*f), f.name()))
         .collect();
     format!(
-        "{}   |   black = neutral towers   grey dot = idle seller   white = ramps   bright green = you\nCastles {}/{}   Towers {}/{}",
+        "{}   |   black = neutral towers   grey dot = idle seller   white = ramps   bright green = you\ngold = gold mine (dark = empty)   dark green = forest   cream = sheep pasture\nCastles {}/{}   Towers {}/{}",
         kingdoms.join("   "),
         world.castles_owned(),
         world.bases.len(),
@@ -179,6 +179,15 @@ fn render_map(world: &WorldState, hero_tile: IVec2) -> Image {
     }
     for seller in &world.sellers {
         put(seller.tile, [200, 200, 195]);
+    }
+    for site in &world.sites {
+        let rgb = match site.kind {
+            super::resources::SiteKind::GoldMine if site.is_empty() => [120, 100, 40],
+            super::resources::SiteKind::GoldMine => [255, 205, 40],
+            super::resources::SiteKind::Forest => [30, 90, 40],
+            super::resources::SiteKind::Pasture => [245, 240, 215],
+        };
+        put(site.tile, rgb);
     }
     // The hero: a bright cross so it stands out at one pixel per tile.
     for d in [IVec2::ZERO, IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {

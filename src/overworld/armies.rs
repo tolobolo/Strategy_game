@@ -223,7 +223,7 @@ fn bandit_text(squad: &BanditSquad) -> String {
 // ---------- systems (Update, Overworld) ----------
 
 /// Walk along `path` at `speed`, popping waypoints as they are reached. True when nothing is left.
-fn follow_path(pos: &mut Vec2, path: &mut Vec<IVec2>, terrain: &TerrainMap, speed: f32, dt: f32) -> bool {
+pub fn follow_path(pos: &mut Vec2, path: &mut Vec<IVec2>, terrain: &TerrainMap, speed: f32, dt: f32) -> bool {
     let Some(&next) = path.first() else { return true };
     let goal = terrain.world_pos(next);
     let to_goal = goal - *pos;
@@ -290,7 +290,8 @@ pub fn ai_armies_act(
 ) {
     let dt = time.delta_secs();
     let mut rng = rand::rng();
-    let WorldState { armies, towers, terrain, bases, .. } = &mut *world;
+    let WorldState { armies, towers, terrain, bases, upgrades, .. } = &mut *world;
+    let siege_secs = upgrades.siege_secs();
     // Kingdoms that lost their castle this frame.
     let mut fallen: Vec<Faction> = Vec::new();
 
@@ -415,10 +416,10 @@ pub fn ai_armies_act(
         }
         if follow_path(&mut army.pos, &mut army.path, terrain, AI_ARMY_SPEED, dt) {
             if t.owner_in(towers, bases).is_player() {
-                army.state = AiArmyState::Capturing(SIEGE_SECS);
+                army.state = AiArmyState::Capturing(siege_secs);
                 nearby.say_for(
                     format!(
-                        "SIEGE! The {} army attacks your {}. Get there within {SIEGE_SECS:.0} s, Tab, JOIN.",
+                        "SIEGE! The {} army attacks your {}. Get there within {siege_secs:.0} s, Tab, JOIN.",
                         army.faction.name(),
                         t.noun()
                     ),

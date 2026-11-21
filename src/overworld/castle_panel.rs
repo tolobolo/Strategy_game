@@ -12,7 +12,7 @@ use crate::assets::{GameAssets, UnitAnim, UnitArt};
 use crate::faction::Faction;
 use crate::states::GameState;
 use crate::ui::{army_stat, avatar_index, panel, sliced};
-use crate::units::{HERO_SLOTS, PlayerArmy, UnitKind};
+use crate::units::{PlayerArmy, UnitKind};
 
 /// Which castle or tower the panel is open for and which unit kind is selected. `None` = closed.
 #[derive(Resource, Default)]
@@ -493,10 +493,14 @@ pub fn refresh_castle_panel(
         kind.abilities_text()
     );
     let title = match target.place {
-        Garrison::Castle(i) => format!("Castle of the {}   garrison {}/{}", world.bases[i].owner.name(), garrison.slots(), target.place.cap()),
-        Garrison::Tower(_) => format!("Your tower   guard {}/{}", garrison.slots(), target.place.cap()),
+        Garrison::Castle(i) => {
+            let out = world.workers_out(i);
+            let workers = if out > 0 { format!(" (+{out} workers out)") } else { String::new() };
+            format!("Castle of the {}   garrison {}/{}{workers}", world.bases[i].owner.name(), garrison.slots() + out, target.place.cap(&world))
+        }
+        Garrison::Tower(_) => format!("Your tower   guard {}/{}", garrison.slots(), target.place.cap(&world)),
     };
-    let slots = format!("{}/{}", army.0.slots(), HERO_SLOTS);
+    let slots = format!("{}/{}", army.0.slots(), world.upgrades.hero_slots());
     let message = nearby.message.clone().unwrap_or_default();
 
     let siege = world.besieger(target.place).map(|i| {

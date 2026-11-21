@@ -77,6 +77,7 @@ guard. Whoever holds a tower gets its income.
 | Prices | Pawn 5, Archer 10, Warrior 15, Monk 20, Lancer 25 |
 | Winning a fight | You take **half** of the loser's gold (bandits: all of their purse, 10–40) |
 | Losing a fight | **Half of your gold** goes to the faction that beat you |
+| Gold mines | Your worker Pawns bring 5 gold per trip (§1.7) |
 
 AI kingdoms and Black earn income too. AI kingdoms spend theirs on units for their castle, which
 feed their armies (§1.5); Black only hoards it, so its loot grows while you wait.
@@ -293,6 +294,94 @@ trees (`resources/wood/trees/tree1..4`, denser where a moisture noise is high), 
 land; water rocks and the rubber duck in the water. Never on bases, walls, ramps, plateau edges or
 feature tiles; trees also keep a tile away from those (`is_edge_art`).
 
+### 1.7 Resources: gold mines, forests and sheep (`overworld/resources.rs`)
+
+Three kinds of **work sites** are on the map. You send **worker Pawns** from your castle to them;
+the workers walk there (A*, same rules as everyone), work, run home with the load, deliver it at the
+castle gate (the load's picture pops up) and go again, so **far sites bring less per minute**.
+
+| Site | On the map | Worker does | One trip brings | Max workers | Runs out? |
+|---|---|---|---|---|---|
+| **Gold mine** | gold stones (`gold_stone_1..6`, sparkling while gold is left); one 8–12 tiles from every castle + 2 **rich** ones at least 14 tiles from all castles | pickaxe 4 s | 5 gold (straight into your gold) | 3 | 300 gold (rich: 600), then empty stones, no sparkle |
+| **Forest** | 4–8 trees within 2 tiles of its middle (the densest tree clumps; planted on open grass if a map has too few) | axe 5 s at a tree | 5 wood | 4 | a tree gives 10 wood, becomes a **stump**, regrows after 90 s |
+| **Sheep pasture** | 4 sheep wandering within 3 tiles of its middle | knife 3 s at a sheep | 4 meat | 2 | a sheep gives 8 meat, a new one comes after 60 s |
+
+**Wood and meat** (HUD: log and meat icons next to the coin) are spent in the
+crafting tree at your House (§1.8).
+
+- **Sending**: walk up to a site and press `Tab` (§6.7): **SEND** (`1`) takes one Pawn from the
+  **supplying castle** = the castle of yours nearest to the site by walking distance; **RECALL** (`2`)
+  sends one home (one that carries nothing if possible; a carrying one delivers first). Pawns come from
+  the castle garrison: hire them at the House, store them in the castle.
+- **Workers still hold their castle slot** (30) while out, so a recalled worker always fits back in;
+  the castle panel title shows "+n workers out".
+- **An empty mine** sends its workers home ("A gold mine is empty"). **A lost castle** loses its
+  workers.
+- **Sheep move**: each sheep grazes 2–6 s, then walks to a random tile within 3 tiles of the
+  pasture's middle at 30 px/s. The sheep a worker picks stops and stands still until it is done.
+- Sites keep off castles (6 tiles), ramps, ramp entries and cliff edges, and 5 tiles from towers,
+  sellers and each other. They are placed with their own random stream after everything else, so a
+  seed's towers, armies and bandits are the same as before. A forest's trees are taken out of the
+  decorations (they belong to the site, so they can become stumps).
+- Not yet: bandits hunting workers, AI kingdoms sending workers (§7).
+
+**Animations** (every action has its own sheet; Pawn sheets are 192 px frames, frames = width / 192):
+
+| Worker is… | Gold mine | Forest | Pasture |
+|---|---|---|---|
+| Walking to the site / tree / sheep | `pawn_run_pickaxe` (6) | `pawn_run_axe` (6) | `pawn_run_knife` (6) |
+| Working, facing the rocks / trunk / sheep | `pawn_interact_pickaxe` (6) | `pawn_interact_axe` (6) | `pawn_interact_knife` (4) |
+| Running home with the load | `pawn_run_gold` (6) | `pawn_run_wood` (6) | `pawn_run_meat` (6) |
+| Waiting (every tree a stump, every sheep taken) | `pawn_idle_pickaxe` (8) | `pawn_idle_axe` (8) | `pawn_idle_knife` (8) |
+| Recalled or mine empty, walking home | `pawn_run` (6) | `pawn_run` (6) | `pawn_run` (6) |
+
+Sheep (`terrain/resources/meat/sheep/`, 128 px frames): `sheep_move` (4) walking, flipped to face
+the way it goes; `sheep_grass` (12) grazing; `sheep_idle` (6) while a worker is busy with it. A
+chopper stands at the trunk's foot (`TRUNK_DROP` per tree sheet), a butcher beside the sheep. Stumps
+(`stump_1..4`) replace the tree of the same number, moved per sheet (`STUMP_OFFSET`) so they sit
+where the trunk was. Code: `WorkerAnim` / `WorkerVisual` / `UnitArt::worker_strip` in `assets.rs`,
+the sprites in `overworld/resource_art.rs`.
+
+`SHOTS_DIR=<dir> WORLD_SEED=<seed> cargo run` also takes a close-up of the nearest mine, forest and
+pasture with a worker busy at each (and one stump), to check the art by eye.
+
+### 1.8 Crafting tree (`src/upgrades.rs`, `assets/upgrades.ron`)
+
+At **your House** press `C` to open the crafting tree (§6.8). Upgrades cost wood, meat and gold,
+are bought once and last the whole game; only you have them (AI kingdoms do not craft). Each one
+needs the one above it in the tree; **Basic Training** is the root. Prices are per tier and live at
+the top of `assets/upgrades.ron` (edit and restart, like `units.ron`):
+
+| Tier | Wood | Meat | Gold |
+|---|---|---|---|
+| 1 | 10 | 10 | 0 |
+| 2 | 30 | 20 | 50 |
+| 3 | 60 | 40 | 100 |
+| 4 | 100 | 80 | 200 |
+
+| Upgrade | Tier | Needs | Effect | Read by |
+|---|---|---|---|---|
+| Basic Training | 1 | – | Opens the tree | – |
+| Combat units | 2 | Basic Training | Hero army +5 slots (20 → 25) | `upgrades.hero_slots()`: buying, TAKE, HUD, panels, siege overflow |
+| Units in castle | 2 | Basic Training | Your castles hold +10 (30 → 40) | `Garrison::cap(world)`, castle and work panels |
+| Keep your money | 2 | Basic Training | Wins loot 55 % of the loser's gold; a lost fight takes 45 % of yours | `WorldState::capture`, `check_victory` |
+| Gather resources | 2 | Basic Training | +1 worker at every site | `WorldState::max_workers` |
+| Price of units | 3 | Combat units | Units cost 5 % less (rounded down, min 1) | `upgrades.unit_price(kind)`: `try_buy`, shop, prompts, seller labels |
+| Regain health | 3 | Combat units | After a fight your survivors heal to full | `check_victory` |
+| Time to siege | 3 | Units in castle | Sieges on your places last +20 s (45 → 65) | `ai_armies_act` |
+| Units in castle II | 4 | Time to siege | Your castles hold +15 more (→ 55) | as Units in castle |
+| Money from towers | 3 | Keep your money | Your towers pay +5 per income tick | `collect_income` |
+| Money from castles | 3 | Keep your money | Your castles pay +2 per income tick | `collect_income` |
+| Passive gathering | 3 | Gather resources | +3 wood and +3 meat every 40 s | `passive_gathering` (`PassiveTimer`) |
+| Strong workers | 3 | Gather resources | Workers walk 10 % faster and carry +2 per trip | `step_workers`, `WorldState::trip_load` |
+
+Code: `UpgradeBook` (the parsed file, loaded once at startup like the unit book; a broken file stops
+the game with the RON error) and `Upgrades` (what you bought, in `WorldState::upgrades`), whose
+getters (`hero_slots()`, `castle_slots()`, `siege_secs()`, `unit_price()`, `loss_pct()`, …) are read
+everywhere instead of the plain constants. The file's checks: one root, every `needs` exists, no loops.
+A card's `pos` is its place in the drawn tree (grid units). **Add an upgrade** = a new entry in the
+file (and a new `Effect` variant plus a getter if it does something new).
+
 ## 2. World structure – the five kingdoms
 
 | Kingdom | Nickname | Tiny Swords colour | Style |
@@ -437,6 +526,11 @@ cleans them up automatically.
 | `src/overworld/armies.rs` | – | `AiArmy` and `BanditSquad` state, movement, sieges of towers and castles, respawns, encounters |
 | `src/overworld/map.rs` | – | The `M` world map overlay, rendered as one pixel per tile from `WorldState` |
 | `src/overworld/shop.rs` | – | The `Tab` shop panel (§6.1): wood table, avatar, animated preview, stats paper, buy button |
+| `src/overworld/resources.rs` | – | Work sites and worker Pawns (§1.7): data, world generation, SEND / RECALL, the work loop. Tests live here |
+| `src/overworld/resource_art.rs` | – | Sprites for sites, trees / stumps, sheep, workers and delivery pop-ups (mirrors `WorldState`) |
+| `src/overworld/work_panel.rs` | – | The `Tab` work panel at a site (§6.7) |
+| `src/upgrades.rs` + `assets/upgrades.ron` | – | The crafting tree: data, what you bought, the effect getters (§1.8). Tests live here |
+| `src/overworld/craft_panel.rs` | – | The `C` crafting panel at your House (§6.8) |
 | `src/ui.rs` | – | Shared UI pieces (§6.2): nine-slice panels, coin / sword stats, ribbons, finish banner |
 | `src/overworld/castle_panel.rs` | – | The `Tab` castle panel (§6.3): avatar ribbon, garrison / hero counts, TAKE / STORE |
 | `src/overworld/army_panel.rs` | – | The `E` army page (§6.4): troop list with avatars, preview and stats |
@@ -456,6 +550,8 @@ cleans them up automatically.
 | `Touchable { touch, radius }` | buildings, towers, sellers | What touching it means (`Touch::Castle/Shop/Tower/Seller`) |
 | `ClickCursor` | combat action buttons | Shows the hand while hovered (brings Bevy's `Hovered`) |
 | `AiArmyMarker(i)`, `BanditMarker(i)` | roaming armies | Index into `WorldState.armies` / `.bandits`; transforms are synced from there |
+| `WorkerMarker(i)` + child `WorkerVisual` | worker Pawns | Index into `WorldState.workers`; spawned / despawned / moved by `sync_workers` |
+| `ForestTree`, `ForestStump`, `MineSparkle`, `SheepSprite`, `SiteLabel` | site sprites | Mirror the site's state (tree or stump, sparkle while gold is left, sheep position and sheet) |
 | `BuildingSprite { kind, shown, swap }` | buildings, towers | Which owner colour the sprite shows and the pending swap after a capture |
 | `ArmyLabel` | roamer children | Floating text kept in sync with the army |
 | `Faction` | hero, roamers, stacks | Which side owns it; drives fill colour and sprite folder |
@@ -480,6 +576,8 @@ cleans them up automatically.
 | `WorldState` | always | The whole map: terrain, bases, towers, sellers, AI armies, bandits, hero position. Overworld entities are rebuilt from it on every `OnEnter(Overworld)` |
 | `Treasuries` | always | Gold per faction (`player_gold()`, `spend`, `take_half`) |
 | `IncomeTimer` | always | 30 s tick for castle and tower income |
+| `OpenWork` | always | The site the work panel is open for |
+| `PendingDeliveries` | always | Loads just delivered, waiting for their pop-up sprite |
 | `PlayerArmy` | always | The stacks the hero carries (max 20 slots). Starts empty |
 | `Nearby` | always | What the hero is touching + a short HUD message |
 | `CursorWanted` | always | The cursor and corner frame this frame; set in `Update`, shown and reset in `PostUpdate` |
@@ -505,7 +603,7 @@ in `combat/actions.rs`). That keeps the rules in one place.
 
 Controls: click a lit tile = Move, click an enemy stack = Strike, click an own stack = Merge,
 `1` = Unstack, `3` = Shield up, `Space` = End turn. There is no way to leave a battle early.
-Overworld keys: `Tab` shop / castle panel, `E` army page, `R` quick buy, `M` map, `1`–`5` castle transfer, `J` join a siege (castle panel open).
+Overworld keys: `Tab` shop / castle panel, `E` army page, `R` quick buy, `M` map, `1`–`5` castle transfer, `J` join a siege (castle panel open), `1` / `2` send / recall a worker (work panel open), `C` crafting at your House (arrows select, `Enter` buys; the hero stands still while it is open).
 
 ### 4.6 Schedule
 
@@ -516,6 +614,8 @@ Update [Overworld]          hero_input -> camera_follow -> remember_hero_positio
                             -> find_touch -> tick_messages -> castle_transfer -> buy_units
                             -> ai_armies_act -> bandits_wander -> respawn_roamers -> refresh_army_labels
                             -> trigger_fights -> roamer_encounters -> refresh_overworld_hud
+                            resources_act -> refresh_site_visuals -> sync_sheep -> sync_workers -> delivery pop-ups
+                            toggle_work -> wire_work_buttons -> refresh_work_panel
                             collect_income (EconomyPlugin)
 
 OnEnter(Combat)             spawn_battle (grid, stacks, turn order) ; spawn_hud
@@ -759,6 +859,30 @@ checking anywhere. Resource: `OpenShop(Option<ShopTarget>)`; `None` despawns the
 
 Not done yet: the world map as a UI texture instead of a generated image.
 
+### 6.7 Work panel (`overworld/work_panel.rs`)
+
+`Tab` next to a gold mine, forest or sheep pasture (Tab, Esc, the X or walking away close it). Wood
+table with the title ("Gold mine - 240 gold left"), a paper with the workers here n/max, what a trip
+brings, and the supplying castle's Pawns ready / workers out / slots used; at the bottom your stock
+of that resource (coin, log or meat icon), the last message and the red **SEND 1** / **RECALL 2**
+buttons (`WorldState::send_worker` / `recall_worker`).
+
+### 6.8 Crafting panel (`overworld/craft_panel.rs`)
+
+Laid out after the user's sketch (`FAILS/`): a wood table with the **tree on paper on the left** and
+the **selected upgrade on paper on the right**.
+- **Tree**: one small paper card per upgrade (name + "Tier n"), placed by its `pos`, joined to its
+  parent by brown elbow lines (down/up to half way, across, on). Cards are tinted by standing:
+  **blue = yours**, plain = can be crafted now, **dark = locked**. The selected card has the corner
+  frame (`cursor_04`, 9-sliced) around it. Click a card or use the **arrow keys** (nearest card that
+  way) to select.
+- **Right**: name, tier, what it needs, the description, whether you can craft it (or what is
+  missing), the **price with the log / meat / coin icons** (red when you are short) and the red
+  **BUY** button (`Enter` too), which reads BOUGHT or LOCKED when it cannot be pressed.
+- **Footer**: what you have of each, and the last message.
+- `C`, Esc, the X or walking away from the House close it.
+- The screenshot tool's last shot opens it at your House with a few upgrades bought.
+
 ### 6.6 Mouse cursor (`src/cursor.rs`)
 
 The pack's cursors (`ui_elements/ui_elements/cursors/`) replace the system one. Each 64 px sheet is
@@ -792,8 +916,8 @@ with → hand + frame; any other tile or stack → no sign.
 - [x] AI kingdoms that buy units, raise armies from their garrison, fight each other and attack towers (yours too); auto-resolve for fights without the player; tower garrisons
 - [x] Sieges: AI armies besiege towers and castles (45 s on yours, HUD countdown); JOIN in the castle panel to fight with the garrison, otherwise auto-resolve
 - [ ] Losing your last castle loses the game
-- [ ] Resources: gold mines, trees (wood), sheep (meat) on the map; Tab on one to assign worker Pawns from the castle, who walk there, work and carry the load home
-- [ ] Crafting in the House (new UI, besides selling Pawns): recipes of wood + meat + gold for upgrades (bigger castle storage, bigger hero army)
+- [x] Resources: gold mines, forests (wood), sheep pastures (meat) on the map; Tab on one to send worker Pawns from the castle, who walk there, work and carry the load home
+- [x] Crafting tree at the House: 13 upgrades bought with wood + meat + gold (army and castle size, siege time, income, workers, prices, healing)
 - [ ] Bandits hunt workers; AI kingdoms send workers too
 - [x] Terrain tiles, cliffs, ramps and decorations from the sprite map
 - [x] Patch-based world with plateaus up to layer 5, terraces and `R` ramps checked so every plateau can be reached

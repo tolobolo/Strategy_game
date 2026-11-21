@@ -1,0 +1,89 @@
+// The crafting tree at your House (agents.md §1.8): every upgrade, its place in the tree and
+// what it does. Edit and restart the game; no recompile needed.
+//
+// prices: per tier, (wood, meat, gold).
+// pos: where the card sits in the tree, in grid units (x to the right, y downwards).
+// needs: the upgrade that must be bought first (None = the root).
+(
+    prices: {
+        1: (10, 10, 0),
+        2: (30, 20, 50),
+        3: (60, 40, 100),
+        4: (100, 80, 200),
+    },
+    upgrades: [
+        (
+            id: "basic_training", name: "Basic Training", tier: 1, needs: None, pos: (2.0, 2.0),
+            text: "The foundation of all knowledge. Opens the rest of the tree.",
+            effect: None,
+        ),
+
+        // Army branch (down left).
+        (
+            id: "army_slots", name: "Combat units", tier: 2, needs: Some("basic_training"), pos: (1.0, 3.0),
+            text: "Room for more units in your army: +5 slots.",
+            effect: ArmySlots(5),
+        ),
+        (
+            id: "unit_price", name: "Price of units", tier: 3, needs: Some("army_slots"), pos: (0.5, 4.0),
+            text: "Units cost 5% less at shops and idle sellers.",
+            effect: UnitPricePct(5),
+        ),
+        (
+            id: "regain_health", name: "Regain health", tier: 3, needs: Some("army_slots"), pos: (1.5, 4.0),
+            text: "After a fight your wounded stacks heal to full before the next one.",
+            effect: HealAfterFight,
+        ),
+
+        // Castle branch (down right).
+        (
+            id: "castle_slots_1", name: "Units in castle", tier: 2, needs: Some("basic_training"), pos: (3.0, 3.0),
+            text: "Your castles hold 10 more units.",
+            effect: CastleSlots(10),
+        ),
+        (
+            id: "siege_time", name: "Time to siege", tier: 3, needs: Some("castle_slots_1"), pos: (3.0, 4.0),
+            text: "Sieges on your castles and towers last 20 s longer: more time to come and JOIN.",
+            effect: SiegeSecs(20.0),
+        ),
+        (
+            id: "castle_slots_2", name: "Units in castle II", tier: 4, needs: Some("siege_time"), pos: (3.0, 5.0),
+            text: "Your castles hold 15 more units.",
+            effect: CastleSlots(15),
+        ),
+
+        // Money branch (up left).
+        (
+            id: "keep_money", name: "Keep your money", tier: 2, needs: Some("basic_training"), pos: (0.5, 1.0),
+            text: "Wins loot 5% more of the loser's gold, and a lost fight takes 45% of yours instead of half.",
+            effect: KeepMoney(loot_pct: 5, loss_pct: 45),
+        ),
+        (
+            id: "tower_income", name: "Money from towers", tier: 3, needs: Some("keep_money"), pos: (0.0, 0.0),
+            text: "Your towers pay 5 more gold every income tick.",
+            effect: TowerIncome(5),
+        ),
+        (
+            id: "castle_income", name: "Money from castles", tier: 3, needs: Some("keep_money"), pos: (1.0, 0.0),
+            text: "Your castles pay 2 more gold every income tick.",
+            effect: CastleIncome(2),
+        ),
+
+        // Resources branch (up right).
+        (
+            id: "gather", name: "Gather resources", tier: 2, needs: Some("basic_training"), pos: (3.5, 1.0),
+            text: "One more worker can work at every gold mine, forest and pasture.",
+            effect: WorkerSlots(1),
+        ),
+        (
+            id: "passive_gathering", name: "Passive gathering", tier: 3, needs: Some("gather"), pos: (3.0, 0.0),
+            text: "You gain 3 wood and 3 meat every 40 s without lifting a finger.",
+            effect: PassiveIncome(wood: 3, meat: 3, every_secs: 40.0),
+        ),
+        (
+            id: "pawn_speed", name: "Strong workers", tier: 3, needs: Some("gather"), pos: (4.0, 0.0),
+            text: "Workers walk 10% faster and carry 2 more per trip.",
+            effect: WorkerBoost(speed_pct: 10, carry: 2),
+        ),
+    ],
+)

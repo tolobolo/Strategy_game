@@ -62,6 +62,11 @@ pub fn gold_stat<M: Component>(assets: &GameAssets, marker: M, font_px: f32) -> 
     icon_stat(assets.ui.icon_gold.clone(), marker, font_px)
 }
 
+/// Your wood or meat: log / meat icon + amount.
+pub fn resource_stat<M: Component>(image: Handle<Image>, marker: M, font_px: f32) -> impl Bundle {
+    icon_stat(image, marker, font_px)
+}
+
 /// Your army: sword icon + `used/max`. Tag with a marker and write the text into its `Text`.
 pub fn army_stat<M: Component>(assets: &GameAssets, marker: M, font_px: f32) -> impl Bundle {
     icon_stat(assets.ui.icon_army.clone(), marker, font_px)

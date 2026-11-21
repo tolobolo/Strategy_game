@@ -9,6 +9,7 @@ use bevy::sprite::Anchor;
 
 use crate::faction::Faction;
 use crate::overworld::buildings::BuildingKind;
+use crate::overworld::resources::{ResourceKind, Tool};
 use crate::units::UnitKind;
 
 /// Every tile sheet is 9 columns × 6 rows of 64×64 tiles.
@@ -41,6 +42,17 @@ pub struct GameAssets {
     pub rocks: [Handle<Image>; 4],
     pub water_rocks: [Strip; 4],
     pub duck: Strip,
+    /// `stump_1..4`, what a chopped tree of the same number leaves (192×256).
+    pub stumps: [Handle<Image>; 4],
+    /// `gold_stone_1..6` (128 px) and their sparkle strips (`_highlight`, 6 frames).
+    pub gold_stones: [Handle<Image>; 6],
+    pub gold_sparkles: [Strip; 6],
+    /// Sheep (128 px frames): walking, grazing, standing.
+    pub sheep_move: Strip,
+    pub sheep_grass: Strip,
+    pub sheep_idle: Strip,
+    /// `wood_resource`, `gold_resource`, `meat_resource`: the load popping up at a delivery.
+    pub resource_pops: HashMap<ResourceKind, Handle<Image>>,
     /// One-shot particle effects from `particle_fx/`, indexed by `Fx`.
     pub fx: HashMap<Fx, Strip>,
     /// `buildings/<colour>_buildings/<kind>.png` per faction and kind.
@@ -61,6 +73,10 @@ pub struct UiAssets {
     pub icon_gold: Handle<Image>,
     /// `icons/icon_05.png`, the sword: shown instead of the word "army".
     pub icon_army: Handle<Image>,
+    /// `icons/icon_02.png`, the log: shown instead of the word "wood".
+    pub icon_wood: Handle<Image>,
+    /// `icons/icon_04.png`, the meat: shown instead of the word "meat".
+    pub icon_meat: Handle<Image>,
     /// `ui_elements/generated/ribbon_<colour>_3.png`, one big ribbon per kingdom colour.
     pub ribbons: HashMap<Faction, Handle<Image>>,
     /// `ui_elements/generated/ribbon_small_<colour>_3.png` (188×60, caps 62 px).
@@ -175,7 +191,7 @@ impl Plugin for GameAssetsPlugin {
             .init_resource::<UnitSprites>()
             .add_systems(
                 Update,
-                (start_effects, apply_unit_visuals, animate_sprites, finish_one_shots, despawn_finished_effects).chain(),
+                (start_effects, apply_unit_visuals, apply_worker_visuals, animate_sprites, finish_one_shots, despawn_finished_effects).chain(),
             );
     }
 }
@@ -220,6 +236,23 @@ fn load_assets(server: &AssetServer, layouts: &mut Assets<TextureAtlasLayout>) -
         )
     });
     assets.duck = strip(server, layouts, "terrain/decorations/rubber_duck/rubber_duck.png", UVec2::splat(32), 3);
+    assets.stumps = std::array::from_fn(|i| server.load(format!("terrain/resources/wood/trees/stump_{}.png", i + 1)));
+    assets.gold_stones =
+        std::array::from_fn(|i| server.load(format!("terrain/resources/gold/gold_stones/gold_stone_{}.png", i + 1)));
+    assets.gold_sparkles = std::array::from_fn(|i| {
+        let path = format!("terrain/resources/gold/gold_stones/gold_stone_{}_highlight.png", i + 1);
+        strip(server, layouts, &path, UVec2::splat(128), 6)
+    });
+    assets.sheep_move = strip(server, layouts, "terrain/resources/meat/sheep/sheep_move.png", UVec2::splat(128), 4);
+    assets.sheep_grass = strip(server, layouts, "terrain/resources/meat/sheep/sheep_grass.png", UVec2::splat(128), 12);
+    assets.sheep_idle = strip(server, layouts, "terrain/resources/meat/sheep/sheep_idle.png", UVec2::splat(128), 6);
+    for (kind, path) in [
+        (ResourceKind::Wood, "terrain/resources/wood/wood_resource/wood_resource.png"),
+        (ResourceKind::Gold, "terrain/resources/gold/gold_resource/gold_resource.png"),
+        (ResourceKind::Meat, "terrain/resources/meat/meat_resource/meat_resource.png"),
+    ] {
+        assets.resource_pops.insert(kind, server.load(path));
+    }
     for fx in Fx::ALL {
         let (file, frame, frames) = fx.sheet();
         assets.fx.insert(fx, strip(server, layouts, file, UVec2::splat(frame), frames));
@@ -232,6 +265,8 @@ fn load_assets(server: &AssetServer, layouts: &mut Assets<TextureAtlasLayout>) -
         icon_close: server.load("ui_elements/ui_elements/icons/icon_09.png"),
         icon_gold: server.load("ui_elements/ui_elements/icons/icon_03.png"),
         icon_army: server.load("ui_elements/ui_elements/icons/icon_05.png"),
+        icon_wood: server.load("ui_elements/ui_elements/icons/icon_02.png"),
+        icon_meat: server.load("ui_elements/ui_elements/icons/icon_04.png"),
         ribbons: HashMap::new(),
         small_ribbons: HashMap::new(),
     };
@@ -479,6 +514,61 @@ pub fn unit_anchor(kind: UnitKind) -> Anchor {
 #[derive(Resource, Default)]
 pub struct UnitSprites {
     cache: HashMap<(Faction, UnitKind, UnitAnim), Strip>,
+    workers: HashMap<(Faction, WorkerAnim), Strip>,
+}
+
+/// What a worker Pawn is doing, each with its own sheet (agents.md §1.7 has the table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WorkerAnim {
+    /// Walking to the work site, tool in hand: `pawn_run_<tool>`.
+    Walk(Tool),
+    /// Mining, chopping or butchering: `pawn_interact_<tool>`.
+    Work(Tool),
+    /// Standing at the site with nothing to do yet: `pawn_idle_<tool>`.
+    Wait(Tool),
+    /// Running home with the load: `pawn_run_<gold|wood|meat>`.
+    Carry(ResourceKind),
+    /// Recalled, walking home empty-handed: `pawn_run`.
+    Home,
+}
+
+impl WorkerAnim {
+    fn sheet(self) -> (String, u32) {
+        let tool = |t: Tool| match t {
+            Tool::Pickaxe => "pickaxe",
+            Tool::Axe => "axe",
+            Tool::Knife => "knife",
+        };
+        match self {
+            WorkerAnim::Walk(t) => (format!("pawn_run_{}.png", tool(t)), 6),
+            WorkerAnim::Work(t) => (format!("pawn_interact_{}.png", tool(t)), if t == Tool::Knife { 4 } else { 6 }),
+            WorkerAnim::Wait(t) => (format!("pawn_idle_{}.png", tool(t)), 8),
+            WorkerAnim::Carry(kind) => {
+                let load = match kind {
+                    ResourceKind::Gold => "gold",
+                    ResourceKind::Wood => "wood",
+                    ResourceKind::Meat => "meat",
+                };
+                (format!("pawn_run_{load}.png"), 6)
+            }
+            WorkerAnim::Home => ("pawn_run.png".to_string(), 6),
+        }
+    }
+
+    pub fn fps(self) -> f32 {
+        match self {
+            WorkerAnim::Wait(_) => 8.0,
+            _ => 10.0,
+        }
+    }
+}
+
+/// A worker Pawn's sprite. Change it and `apply_worker_visuals` swaps the sheet.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerVisual {
+    pub faction: Faction,
+    pub anim: WorkerAnim,
+    pub flip_x: bool,
 }
 
 /// What a unit sprite shows. Change it and `apply_unit_visuals` swaps the sheet.
@@ -523,6 +613,33 @@ impl UnitArt<'_> {
         let strip = strip(&self.server, &mut self.layouts, &path, UVec2::splat(unit_frame(kind)), frames);
         self.sprites.cache.insert(key, strip.clone());
         strip
+    }
+
+    /// A worker Pawn's strip for `anim` in `faction`'s colour.
+    pub fn worker_strip(&mut self, faction: Faction, anim: WorkerAnim) -> Strip {
+        if let Some(strip) = self.sprites.workers.get(&(faction, anim)) {
+            return strip.clone();
+        }
+        let (file, frames) = anim.sheet();
+        let path = format!("{}/pawn/{file}", faction.sprite_dir());
+        let strip = strip(&self.server, &mut self.layouts, &path, UVec2::splat(unit_frame(UnitKind::Pawn)), frames);
+        self.sprites.workers.insert((faction, anim), strip.clone());
+        strip
+    }
+
+    /// A child entity bundle showing a worker Pawn, feet at `offset` from the parent, at `scale`.
+    pub fn worker_bundle(&mut self, visual: WorkerVisual, scale: f32, offset: Vec2, z: f32) -> impl Bundle {
+        let strip = self.worker_strip(visual.faction, visual.anim);
+        let mut sprite = strip.sprite();
+        sprite.flip_x = visual.flip_x;
+        (
+            visual,
+            sprite,
+            Animated::new(strip.frames, visual.anim.fps()),
+            unit_anchor(UnitKind::Pawn),
+            Transform::from_translation(offset.extend(z)).with_scale(Vec3::splat(scale)),
+            Pickable::IGNORE,
+        )
     }
 
     /// The arrow projectile of a faction's archers (`archer/arrow.png`, 64×64, points right).
@@ -570,6 +687,23 @@ fn apply_unit_visuals(
         } else {
             Animated::new(strip.frames, visual.anim.fps())
         };
+    }
+}
+
+/// Swap a worker's sheet whenever its `WorkerVisual` changes. A change of facing only flips the
+/// sprite, so the animation does not restart every time the worker turns.
+fn apply_worker_visuals(
+    mut art: UnitArt,
+    mut query: Query<(&WorkerVisual, &mut Sprite, &mut Animated), Changed<WorkerVisual>>,
+) {
+    for (visual, mut sprite, mut animated) in &mut query {
+        sprite.flip_x = visual.flip_x;
+        let strip = art.worker_strip(visual.faction, visual.anim);
+        if sprite.image != strip.image {
+            sprite.image = strip.image;
+            sprite.texture_atlas = Some(TextureAtlas { layout: strip.layout, index: 0 });
+            *animated = Animated::new(strip.frames, visual.anim.fps());
+        }
     }
 }
 

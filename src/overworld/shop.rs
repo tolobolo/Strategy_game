@@ -10,7 +10,7 @@ use crate::assets::{AttackDir, GameAssets, UnitAnim, UnitArt};
 use crate::faction::Faction;
 use crate::states::GameState;
 use crate::ui::{army_stat, avatar_index, gold_stat, panel, sliced};
-use crate::units::{HERO_SLOTS, PlayerArmy, UnitKind};
+use crate::units::{PlayerArmy, UnitKind};
 
 /// What the open panel sells and where it was opened. `None` = closed.
 #[derive(Resource, Default)]
@@ -23,6 +23,9 @@ pub struct ShopTarget {
     /// Colour of the avatar and the preview: the shop's owner, or Blue for idle sellers.
     pub faction: Faction,
     pub title: &'static str,
+    /// What one unit costs you and how many you can carry (both change with crafted upgrades).
+    pub price: u32,
+    pub slots: u32,
 }
 
 #[derive(Component)]
@@ -67,17 +70,24 @@ fn button_pressed_mode() -> NodeImageMode {
 /// What the thing the hero is touching would sell, if it is a shop of yours or an idle seller.
 fn shop_for(world: &WorldState, touch: Option<Touch>) -> Option<ShopTarget> {
     match touch? {
-        Touch::Shop { base, kind } if world.bases[base].owner.is_player() => Some(ShopTarget {
-            touch: Touch::Shop { base, kind },
-            unit: kind.sells()?,
-            faction: world.bases[base].owner,
-            title: kind.name(),
-        }),
+        Touch::Shop { base, kind } if world.bases[base].owner.is_player() => {
+            let unit = kind.sells()?;
+            Some(ShopTarget {
+                touch: Touch::Shop { base, kind },
+                unit,
+                faction: world.bases[base].owner,
+                title: kind.name(),
+                price: world.upgrades.unit_price(unit),
+                slots: world.upgrades.hero_slots(),
+            })
+        }
         Touch::Seller(i) => Some(ShopTarget {
             touch: Touch::Seller(i),
             unit: world.sellers[i].unit,
             faction: Faction::Reclaimers,
             title: "Idle seller",
+            price: world.upgrades.unit_price(world.sellers[i].unit),
+            slots: world.upgrades.hero_slots(),
         }),
         _ => None,
     }
@@ -133,8 +143,8 @@ fn spawn_panel(commands: &mut Commands, assets: &GameAssets, server: &AssetServe
         s.range.0,
         s.range.1,
         ability_lines(target.unit),
-        target.unit.price(),
-        HERO_SLOTS
+        target.price,
+        target.slots
     );
     let ink = TextColor(Color::srgb(0.22, 0.16, 0.10));
 
@@ -247,7 +257,7 @@ fn spawn_panel(commands: &mut Commands, assets: &GameAssets, server: &AssetServe
                                 ..default()
                             },
                             children![(
-                                Text::new(format!("BUY  -  {}g", target.unit.price())),
+                                Text::new(format!("BUY  -  {}g", target.price)),
                                 TextFont { font_size: FontSize::Px(24.0), ..default() },
                                 TextColor(Color::WHITE),
                                 Pickable::IGNORE,
@@ -291,6 +301,7 @@ fn on_buy_release(release: On<Pointer<Release>>, assets: Res<GameAssets>, mut im
 fn on_buy_click(
     click: On<Pointer<Click>>,
     open: Res<OpenShop>,
+    world: Res<WorldState>,
     mut nearby: ResMut<Nearby>,
     mut treasuries: ResMut<Treasuries>,
     mut army: ResMut<PlayerArmy>,
@@ -299,7 +310,7 @@ fn on_buy_click(
         return;
     }
     if let Some(target) = open.0 {
-        try_buy(target.unit, &mut nearby, &mut treasuries, &mut army);
+        try_buy(target.unit, &world, &mut nearby, &mut treasuries, &mut army);
     }
 }
 
@@ -310,6 +321,7 @@ fn on_close_click(click: On<Pointer<Click>>, mut open: ResMut<OpenShop>) {
 }
 
 pub fn refresh_shop_status(
+    world: Res<WorldState>,
     treasuries: Res<Treasuries>,
     army: Res<PlayerArmy>,
     nearby: Res<Nearby>,
@@ -318,7 +330,7 @@ pub fn refresh_shop_status(
     mut message: Single<&mut Text, (With<ShopMessage>, Without<ShopGold>, Without<ShopArmy>)>,
 ) {
     set_text(&mut gold, treasuries.player_gold().to_string());
-    set_text(&mut slots, format!("{}/{}", army.0.slots(), HERO_SLOTS));
+    set_text(&mut slots, format!("{}/{}", army.0.slots(), world.upgrades.hero_slots()));
     set_text(&mut message, nearby.message.clone().unwrap_or_default());
 }
 
