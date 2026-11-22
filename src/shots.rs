@@ -104,6 +104,7 @@ fn plan_shots(mut world: ResMut<WorldState>, windows: Query<&Window>, mut shots:
             state: WorkerState::Working { left: 999.0, slot },
             recalled: false,
             alive: true,
+            trips_left: None,
         });
         let name = format!("seed{seed}_site_{}.png", kind.name().replace(' ', "_").to_lowercase());
         shots.list.push((name, world.terrain.world_pos(tile), CLOSE_UP_SCALE));

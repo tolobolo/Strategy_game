@@ -238,6 +238,9 @@ pub struct Worker {
     /// Goes back into the garrison at the next visit to the castle.
     pub recalled: bool,
     pub alive: bool,
+    /// An AI kingdom's worker does this many more trips, then goes into its castle for good.
+    /// Yours: `None` (works until recalled).
+    pub trips_left: Option<u32>,
 }
 
 impl Worker {
@@ -316,6 +319,7 @@ impl WorldState {
             state: WorkerState::ToSite,
             recalled: false,
             alive: true,
+            trips_left: None,
         };
         // Reuse the slot of a worker that is gone, so entity indices stay small.
         match self.workers.iter().position(|w| !w.alive) {
@@ -323,6 +327,41 @@ impl WorldState {
             None => self.workers.push(worker),
         }
         Ok(format!("A Pawn walks out to the {}.", self.sites[site].kind.name().to_lowercase()))
+    }
+
+    /// An AI kingdom's Pawn (no garrison Pawn needed) walks from its castle nearest to `site`,
+    /// works there like yours for `trips` trips, then goes into that castle. False if none of its
+    /// castles can reach the site.
+    pub fn ai_send_worker(&mut self, faction: Faction, site: usize, trips: u32) -> bool {
+        let goal = self.sites[site].tile;
+        let castle = self
+            .bases
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.owner == faction)
+            .filter_map(|(i, b)| self.terrain.find_path(b.spawn_tile(), goal).map(|p| (p.len(), i)))
+            .min()
+            .map(|(_, i)| i);
+        let Some(castle) = castle else { return false };
+        let gate = self.bases[castle].spawn_tile();
+        let spot = work_spot(&self.sites[site], &self.terrain, self.workers_at(site));
+        let Some(path) = self.terrain.find_path(gate, spot) else { return false };
+        let worker = Worker {
+            faction,
+            site,
+            castle,
+            pos: self.terrain.world_pos(gate),
+            path,
+            state: WorkerState::ToSite,
+            recalled: false,
+            alive: true,
+            trips_left: Some(trips.max(1)),
+        };
+        match self.workers.iter().position(|w| !w.alive) {
+            Some(i) => self.workers[i] = worker,
+            None => self.workers.push(worker),
+        }
+        true
     }
 
     /// RECALL: one worker of `site` goes home and rejoins the garrison (after delivering what it carries).
@@ -473,10 +512,12 @@ pub fn step_workers(
     messages: &mut Vec<String>,
     deliveries: &mut Vec<Delivery>,
 ) {
-    let speed = WORKER_SPEED * world.upgrades.worker_speed();
-    let carry = world.upgrades.carry_bonus();
+    // Your crafted worker upgrades are yours only; AI workers walk and carry the plain amounts.
+    let (your_speed, your_carry) = (WORKER_SPEED * world.upgrades.worker_speed(), world.upgrades.carry_bonus());
     let WorldState { workers, sites, bases, terrain, .. } = world;
     for w in workers.iter_mut().filter(|w| w.alive) {
+        let yours = w.faction.is_player();
+        let (speed, carry) = if yours { (your_speed, your_carry) } else { (WORKER_SPEED, 0) };
         let site = &mut sites[w.site];
         // Lost the castle: its workers are lost with it.
         if bases[w.castle].owner != w.faction {
@@ -529,7 +570,7 @@ pub fn step_workers(
                 }
                 let load = harvest(site, slot, site.kind.trip_load() + carry);
                 release(w, site);
-                if site.kind == SiteKind::GoldMine && site.gold_left == 0 && load > 0 {
+                if yours && site.kind == SiteKind::GoldMine && site.gold_left == 0 && load > 0 {
                     messages.push("A gold mine is empty: its workers come home.".to_string());
                 }
                 if load == 0 {
@@ -547,8 +588,16 @@ pub fn step_workers(
                 let kind = site.kind.resource();
                 treasuries.add_resource(w.faction, kind, load);
                 deliveries.push(Delivery { pos: w.pos, kind });
-                if w.recalled || site.is_empty() {
-                    bases[w.castle].garrison.add(UnitKind::Pawn, 1);
+                // An AI worker counts its trips; after the last it goes into the castle.
+                if let Some(n) = w.trips_left.as_mut() {
+                    *n = n.saturating_sub(1);
+                }
+                let trips_done = w.trips_left == Some(0);
+                if w.recalled || site.is_empty() || trips_done {
+                    // Your Pawn goes back into the garrison; an AI kingdom's worker simply goes in.
+                    if yours {
+                        bases[w.castle].garrison.add(UnitKind::Pawn, 1);
+                    }
                     w.alive = false;
                 } else {
                     w.path =
@@ -558,7 +607,9 @@ pub fn step_workers(
             }
             WorkerState::GoingHome => {
                 if follow_path(&mut w.pos, &mut w.path, terrain, speed, dt) {
-                    bases[w.castle].garrison.add(UnitKind::Pawn, 1);
+                    if yours {
+                        bases[w.castle].garrison.add(UnitKind::Pawn, 1);
+                    }
                     w.alive = false;
                 }
             }

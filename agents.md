@@ -163,7 +163,7 @@ what it is doing, so you can watch it):
   and can walk to, an army skips any whose garrison is stronger than **0.8 ×** its own strength, and
   picks the lowest score = walking distance in tiles × (1 + garrison strength / own strength): near
   and weak first. Only places within reach of its territory count (towers: 8 + 5 tiles; **castles:
-  8 + 20 tiles**, `CASTLE_REACH_TILES`, since castles are far apart), and none another kingdom is
+  8 + 40 tiles**, `CASTLE_REACH_TILES`, so every castle on the map is in reach), and none another kingdom is
   already besieging.
 - **Storming castles together**: for a castle the garrison is compared with **all the kingdom's
   armies together**, and once one army marches on (or besieges) an enemy castle, its fellow armies
@@ -175,29 +175,47 @@ what it is doing, so you can watch it):
 - **Speeds**: marching and patrolling **80 px/s**; hunting and guarding **115**; **hurrying to a
   siege 160** (`SIEGE_RUSH_SPEED`): defenders of a place under siege (yours or another kingdom's)
   and fellow armies joining their kingdom's siege. Your hero walks 260.
-- **Gathering troops**: an empty army waits at its castle and tries every 5 s to raise a new army,
-  which needs 10 units there (5 stay, at least 5 go). Castles fill by buying (up to 3 units per
-  castle every 5 s, as long as the gold lasts: about 1.5 units per 30 s for a castle with 3 towers),
-  so this usually takes 1–2 minutes, 3+ from an empty castle.
+- **Gathering troops** (label "gathering troops… Ns"): an empty army waits at its castle for
+  **20 s** (`FREE_ARMY_SECS`, 10 s after coming home to rest). Then it takes units from the castle
+  if there are 10 (5 stay, at least 5 go); if not, it gets a **free army** like the starting ones
+  (4–8 Warriors, 2–5 Archers, 1–3 Lancers, no bigger than its crafted size). Gold is not needed.
+- **Restocking at sellers** ("buying units at a seller"): an army below **60 %** of its full size
+  with units left goes to the nearest idle seller (not the Pawn seller) **if it is closer than its
+  home castle** and its kingdom can pay for at least **5** of that seller's units, and buys that
+  kind with the kingdom's gold up to its full size (same prices as you). After a capture it does
+  this instead of walking home when a seller is closer. **One such trip per kingdom at a time, and
+  the kingdom stops buying for its castles meanwhile**, so the gold is still there when the army
+  arrives (without this, 8 trips in 10 found an empty purse). If it still cannot pay, it walks home.
 - **Resting away from home**: an army that rests somewhere that is no longer its home (you took
   that castle) first walks to the castle its kingdom still holds.
 - **Armies meeting**: two AI armies of different kingdoms within touching distance (40 px) stop and
   fight for 6 s, then auto-resolve decides it; the loser is destroyed (a ghost).
-- **Spending gold** (`overworld/ai.rs`): every **5 s** each AI kingdom first **crafts** its next
-  step if it can pay for it, then buys up to 3 units **into every castle it holds**, at the same
-  prices as the player: Warrior 4, Archer 3, Lancer 2, Monk 1 (weights; Pawns are not bought). While
-  a crafting step is left, a castle stops buying at **12** units, so the kingdom saves for it.
-- **AI crafting** (`ai::AI_LADDER`, gold only, one step at a time, everything visible on the map):
+- **Spending gold** (`overworld/ai.rs`): every **5 s** each AI kingdom buys up to 3 units **into
+  every castle it holds** (up to its castle size), at the same prices as the player: Warrior 4,
+  Archer 3, Lancer 2, Monk 1 (weights; Pawns are not bought). Gold also pays for restocking at
+  sellers (below). AI kingdoms do not craft with gold.
+- **Gathering trips = AI upgrades** (`ai::expedition_step`): a **stuck** kingdom (most of its
+  armies only patrolling: everything in reach is too strong) sends **3 Pawns** in its colour to the
+  nearest gold mines, forests and pastures. Each works there exactly like your workers (same
+  animations) for **2–4 trips**, then goes into the castle (no Pawns are added). Meanwhile its
+  armies carry on as usual. When all are back the kingdom gets its next upgrade for free and its
+  armies look again at what they can take. Other kingdoms' armies (and you) can catch these Pawns.
+  The HUD says "The Red kingdom sends 3 Pawns out to gather" and "The Red workers came home: …".
 
-  | Step | Price | Effect |
-  |---|---|---|
-  | 1 | 60 | armies up to **25** units |
-  | 2 | 100 | **one more army** (raised from its castle) |
-  | 3 | 80 | castles hold **40** |
-  | 4 | 120 | armies up to **30** units |
-  | 5 | 180 | **one more army** |
+  | Upgrade | Effect (all visible on the map) |
+  |---|---|
+  | 1 | armies up to **25** units |
+  | 2 | **one more army** |
+  | 3 | castles hold **40** |
+  | 4 | armies up to **30** |
+  | 5 | **one more army** |
+  | 6 | armies up to **35** |
+  | 7 | castles hold **50** |
+  | 8 | **one more army** |
 
-  The HUD says it when a kingdom crafts ("The Red kingdom raises another army!").
+- **Trying its luck**: a patrolling army with nothing it can take marches anyway on a target that
+  is too strong for it, about once a minute (`DARING_CHANCE`); and the random guard duty makes
+  armies that could attack hold back now and then.
 - **Raising armies**: the first two armies start ready (random 4–8 Warriors, 2–5 Archers, 1–3
   Lancers). After that an army is **drawn from a castle garrison** (home if it has enough, else the
   fullest castle it holds): everything above a reserve of **5** units, at most the crafted army size
@@ -206,9 +224,11 @@ what it is doing, so you can watch it):
   came home rests **10 s**.
 - **Testing the balance**: `cargo test conquest_report -- --ignored --nocapture` plays 60 minutes
   of AI on seeds 1–8 (with income, crafting, ghosts and respawns, you doing nothing) and prints every
-  castle that changes hands and whether one kingdom took everything. Last run: one kingdom took
-  every AI castle on 5 seeds (within 8–20 min); your castle, unattended, fell on most seeds after
-  30–52 min; on the other seeds two or three kingdoms were still fighting after an hour.
+  castle that changes hands and whether one kingdom took everything. Last run (12 seeds, with
+  gathering trips and the 40-tile castle reach): every seed ended with one kingdom holding every
+  castle, yours included (unattended), after 4–30 min; no stalemates. `SEEDS=12` or
+  `SEED_LIST=2,3` choose the seeds; the report also counts army fights between kingdoms, how close
+  their armies came, and for the kingdoms left whether each other's castles are in reach.
 
 **Ghosts** (`AiArmy::die`, `ghosts_fly_home`, `sync_ghosts`): however an AI army is destroyed (by
 you, another kingdom, bandits or a lost siege), it turns into a ghost knight
@@ -1027,7 +1047,7 @@ with → hand + frame; any other tile or stack → no sign.
 - [ ] Bandits hunt workers; AI kingdoms send workers too
 - [x] AI kingdoms grow visibly: crafting ladder (bigger / more armies, bigger castles), conquerors inherit the army slots, castles stormed together; one kingdom can win
 - [ ] Kingdoms that differ (unit mix, army count, speed)
-- [ ] AI kingdoms that cannot beat a castle in reach send Pawns to gather and grow (user's idea)
+- [x] AI kingdoms that are stuck send Pawns out on gathering trips and come back with an upgrade (user's idea)
 - [x] Terrain tiles, cliffs, ramps and decorations from the sprite map
 - [x] Patch-based world with plateaus up to layer 5, terraces and `R` ramps checked so every plateau can be reached
 - [x] Unit sprites with idle / run / attack / guard
